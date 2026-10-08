@@ -1,5 +1,17 @@
 # @encatch/react-native-sdk
 
+## 1.4.3
+
+### Bug Fixes
+
+* Android: the form dialog no longer jumps above the status bar when the keyboard opens on apps that are not edge-to-edge (targetSdk < 35, or Android 14 and older).
+* Fix a startup crash (`Requiring unknown module "undefined"`) in bare React Native 0.73–0.80 apps that do not install the SDK's optional peers.
+* iOS: keep the form height in sync after the keyboard closes.
+
+### Features
+
+* Add an `appPackageId` config option, and warn at init when the app package name cannot be detected instead of every API call failing silently with "referer is required".
+
 ## 1.4.3-beta.0
 
 ### Patch Changes
