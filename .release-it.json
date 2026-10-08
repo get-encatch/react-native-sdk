@@ -1,0 +1,32 @@
+{
+  "$schema": "https://unpkg.com/release-it@21/schema/release-it.json",
+  "git": {
+    "requireBranch": ["main", "release/*"],
+    "requireCleanWorkingDir": true,
+    "requireUpstream": true,
+    "requireCommits": true,
+    "commitMessage": "chore(release): v${version}",
+    "tagName": "v${version}",
+    "tagAnnotation": "v${version}",
+    "push": true
+  },
+  "npm": {
+    "publish": true
+  },
+  "github": {
+    "release": true,
+    "web": true,
+    "releaseName": "v${version}"
+  },
+  "hooks": {
+    "before:init": ["pnpm exec tsc --noEmit"],
+    "after:bump": ["pnpm run build", "npm pack --dry-run"]
+  },
+  "plugins": {
+    "@release-it/conventional-changelog": {
+      "preset": { "name": "conventionalcommits" },
+      "infile": "CHANGELOG.md",
+      "header": "# @encatch/react-native-sdk"
+    }
+  }
+}

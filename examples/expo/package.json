@@ -1,0 +1,52 @@
+{
+  "name": "expo-example",
+  "main": "expo-router/entry",
+  "version": "1.0.1",
+  "scripts": {
+    "dev": "expo start --tunnel",
+    "start": "expo start --tunnel",
+    "android": "expo start --tunnel --android",
+    "ios": "expo start --tunnel --ios",
+    "start:lan": "expo start",
+    "start:localhost": "expo start --localhost",
+    "web": "expo start --web",
+    "run:ios": "expo run:ios",
+    "run:android": "expo run:android",
+    "build:android": "rm -rf android/app/build/generated/assets android/app/build/intermediates/assets android/app/build/intermediates/compressed_assets android/app/build/intermediates/merged_assets && JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home ANDROID_HOME=$HOME/Library/Android/sdk ./android/gradlew -p android assembleRelease && echo \"\\nAPK: $(pwd)/android/app/build/outputs/apk/release/app-release.apk\"",
+    "build:android-debug": "rm -rf android/app/build/generated/assets android/app/build/intermediates/assets android/app/build/intermediates/compressed_assets android/app/build/intermediates/merged_assets && JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home ANDROID_HOME=$HOME/Library/Android/sdk ./android/gradlew -p android assembleDebug && echo \"\\nAPK: $(pwd)/android/app/build/outputs/apk/debug/app-debug.apk\"",
+    "build:ios": "xcodebuild -workspace ios/encatchexpotester.xcworkspace -scheme encatchexpotester -configuration Release -destination generic/platform=iOS -archivePath ios/build/encatchexpotester.xcarchive archive && xcodebuild -exportArchive -archivePath ios/build/encatchexpotester.xcarchive -exportPath ios/build/ipa -exportOptionsPlist ios/exportOptions.plist"
+  },
+  "dependencies": {
+    "@encatch/react-native-sdk": "workspace:*",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-picker/picker": "2.11.4",
+    "@react-navigation/native": "^7.1.33",
+    "expo": "~55.0.5",
+    "expo-application": "~55.0.8",
+    "expo-camera": "~55.0.18",
+    "expo-constants": "~55.0.7",
+    "expo-device": "~55.0.9",
+    "expo-font": "~55.0.4",
+    "expo-linking": "~55.0.7",
+    "expo-localization": "~55.0.8",
+    "expo-router": "~55.0.4",
+    "expo-splash-screen": "~55.0.10",
+    "expo-status-bar": "~55.0.4",
+    "expo-symbols": "~55.0.5",
+    "expo-web-browser": "~55.0.9",
+    "expo-blur": "~55.0.8",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-native": "0.83.2",
+    "react-native-logs": "^5.6.0",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.24.0",
+    "react-native-web": "~0.21.2",
+    "react-native-webview": "13.16.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.14",
+    "typescript": "~5.9.3"
+  },
+  "private": true
+}

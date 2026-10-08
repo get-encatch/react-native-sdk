@@ -1,0 +1,13 @@
+packages:
+  - examples/*
+
+# Do not auto-install peer dependencies. The SDK's optional peers (expo-*,
+# react-native-device-info, ...) must stay out of the repository root, so the
+# bare example exercises the "optional peer not installed" code paths for real.
+autoInstallPeers: false
+
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - release-it@21.1.1

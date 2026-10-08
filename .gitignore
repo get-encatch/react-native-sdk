@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tgz
+
+# Local settings (never commit keys)
+.env
+.env*.local
+
+# Tooling
+.DS_Store
+*.log
+.metro-health-check*
+*.tsbuildinfo
