@@ -1,0 +1,98 @@
+{
+  "name": "@encatch/react-native-sdk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/get-encatch/react-native-sdk.git"
+  },
+  "homepage": "https://encatch.com",
+  "bugs": {
+    "url": "https://github.com/get-encatch/react-native-sdk/issues"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "version": "1.4.3-beta.0",
+  "files": [
+    "dist",
+    "optional",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "release": "release-it",
+    "prepare": "tsup",
+    "prepack": "tsup"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.73.0",
+    "react-native-webview": ">=13.12.0",
+    "react-native-safe-area-context": ">=5.0.0",
+    "@react-native-async-storage/async-storage": ">=2.0.0",
+    "@react-navigation/native": ">=7.0.0",
+    "expo-application": ">=6.0.0",
+    "expo-device": ">=7.0.0",
+    "expo-localization": ">=16.0.0",
+    "expo-router": ">=4.0.0",
+    "expo-web-browser": ">=14.0.0",
+    "expo-blur": ">=14.0.0",
+    "react-native-localize": ">=3.0.0",
+    "react-native-device-info": ">=10.0.0",
+    "react-native-logs": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "expo-application": {
+      "optional": true
+    },
+    "expo-device": {
+      "optional": true
+    },
+    "expo-localization": {
+      "optional": true
+    },
+    "expo-router": {
+      "optional": true
+    },
+    "expo-web-browser": {
+      "optional": true
+    },
+    "expo-blur": {
+      "optional": true
+    },
+    "react-native-localize": {
+      "optional": true
+    },
+    "react-native-device-info": {
+      "optional": true
+    },
+    "react-native-logs": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "uuidv7": "^1.1.0"
+  },
+  "devDependencies": {
+    "@encatch/schema": "^1.5.2",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@release-it/conventional-changelog": "^12.0.2",
+    "@types/react": "~19.2.14",
+    "react": "19.2.4",
+    "react-native": "0.84.1",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-webview": "13.16.1",
+    "release-it": "^21.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "~5.9.3",
+    "zod": "^4.0.0"
+  },
+  "packageManager": "pnpm@11.15.1"
+}

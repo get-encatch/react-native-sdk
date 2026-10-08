@@ -1,0 +1,8 @@
+{
+  "apiKey": "your_publishable_sdk_key",
+  "formId": "your-form-id",
+  "apiBaseUrl": "https://api.encatch.com",
+  "webHost": "https://form.encatch.com",
+  "appPackageId": "",
+  "userName": "bare-example-user"
+}
