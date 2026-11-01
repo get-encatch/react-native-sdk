@@ -92,7 +92,7 @@
     "release-it": "^21.1.1",
     "tsup": "^8.5.1",
     "typescript": "~5.9.3",
-    "zod": "^4.0.0"
+    "zod": "^4.6.6"
   },
   "packageManager": "pnpm@11.15.1"
 }
