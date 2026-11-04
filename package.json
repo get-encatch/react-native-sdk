@@ -89,7 +89,7 @@
     "react-native": "0.84.1",
     "react-native-safe-area-context": "5.7.0",
     "react-native-webview": "13.16.1",
-    "release-it": "^21.1.1",
+    "release-it": "^21.1.2",
     "tsup": "^8.5.1",
     "typescript": "~5.9.3",
     "zod": "^4.0.0"
