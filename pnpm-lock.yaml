@@ -155,8 +155,8 @@ importers:
         specifier: ~55.0.7
         version: 55.0.17(expo@55.0.31)(react-native@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(supports-color@8.1.1)
       expo-device:
-        specifier: ~55.0.9
-        version: 55.0.21(expo@55.0.31)
+        specifier: ~58.0.5
+        version: 58.0.5(expo@55.0.31)
       expo-font:
         specifier: ~55.0.4
         version: 55.0.8(expo@55.0.31)(react-native@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
@@ -3367,8 +3367,8 @@ packages:
       expo: '*'
       react-native: '*'
 
-  expo-device@55.0.21:
-    resolution: {integrity: sha512-W2DNWWnjk3KSdAy2BtK9ie1lByO6IsJIpriQAnvS1+d/e12wXhq14iZLUB5iA0CCVftU3eliQRIzkyT2cdL9Ng==}
+  expo-device@58.0.5:
+    resolution: {integrity: sha512-GNyaHPwoiI/z2SGR14R6d9J7hFSW2JabZieJtC3l6/LO2mJYVCbhEsQ7/1ljGBeTUnFFWHcFLccdaWEhOWtaQQ==}
     peerDependencies:
       expo: '*'
 
@@ -9839,7 +9839,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  expo-device@55.0.21(expo@55.0.31):
+  expo-device@58.0.5(expo@55.0.31):
     dependencies:
       expo: 55.0.31(@babel/core@7.29.7(supports-color@8.1.1))(@expo/dom-webview@55.0.6)(@expo/metro-runtime@55.0.12)(expo-router@55.0.18)(react-dom@19.2.4(react@19.2.4))(react-native-webview@13.16.1(react-native@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4))(react-native@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)(supports-color@8.1.1)(typescript@5.9.3)
       ua-parser-js: 0.7.41
