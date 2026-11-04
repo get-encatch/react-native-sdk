@@ -91,7 +91,7 @@
     "react-native-webview": "13.16.1",
     "release-it": "^21.1.1",
     "tsup": "^8.5.1",
-    "typescript": "~5.9.3",
+    "typescript": "~7.0.2",
     "zod": "^4.0.0"
   },
   "packageManager": "pnpm@11.15.1"
