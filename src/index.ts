@@ -13,6 +13,8 @@ export { buildSubmitRequest } from './form-helpers';
 export type { NativeFormResponse, BuildSubmitRequestOptions, NativeFormValue } from './form-helpers';
 export type {
   EncatchConfig,
+  EncatchRequestInfo,
+  EncatchResponseInfo,
   ShowFormInterceptorPayload,
   UserTraits,
   IdentifyOptions,

@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
+
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
 
 export default defineConfig({
   entry: ['src/index.ts'],
@@ -31,6 +34,8 @@ export default defineConfig({
     // Metro bundle, so keep them as runtime requires (see optional/*.js).
     /^\.\.\/optional\//,
   ],
+  // The SDK reports this as $sdkVersion (see SDK_VERSION in src/encatch.ts).
+  define: { __ENCATCH_SDK_VERSION__: JSON.stringify(version) },
   platform: 'neutral',
   target: 'es2017',
   esbuildOptions(options) {
