@@ -1,0 +1,9 @@
+# DV2: identified user closes the manual form on its welcome screen (a dismissal).
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- runFlow: ../common/login.yaml
+- tapOn: { id: home-show-form }
+- runFlow: { file: wait-dev-survey.yaml, env: { SURVEY_TIMEOUT: 25000 } }
+- runFlow: close-dev-survey.yaml
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

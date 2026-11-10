@@ -1,0 +1,12 @@
+# E3: a screen with a survey (12 s delay), opened again and again before it shows.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: tab-events }
+- tapOn: { id: tab-home }
+- tapOn: { id: tab-events }
+- tapOn: { id: tab-home }
+- tapOn: { id: tab-events }
+- runFlow: { file: common/wait-survey.yaml, env: { SURVEY_TIMEOUT: 20000 } }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }

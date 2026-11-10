@@ -40,3 +40,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# E2E run output (screenshots, request logs)
+e2e/.results/

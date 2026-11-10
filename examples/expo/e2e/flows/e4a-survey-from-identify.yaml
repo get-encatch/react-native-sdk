@@ -1,0 +1,7 @@
+# E4a: the identify reply carries a survey.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: { file: common/login.yaml, env: { WAIT_HOME: 'false' } }
+- runFlow: { file: common/wait-survey.yaml, env: { SURVEY_TIMEOUT: 20000 } }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }

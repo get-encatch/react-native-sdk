@@ -1,0 +1,17 @@
+# DV3: identified user starts the manual form, rates, then closes it before submitting.
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- runFlow: ../common/login.yaml
+- tapOn: { id: home-show-form }
+- runFlow: { file: wait-dev-survey.yaml, env: { SURVEY_TIMEOUT: 25000 } }
+- tapOn: "Get Started"
+- extendedWaitUntil:
+    visible: "How would you rate.*"
+    timeout: 10000
+- tapOn:
+    below: "How would you rate.*"
+    above: "Poor"
+    index: 3
+- runFlow: close-dev-survey.yaml
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

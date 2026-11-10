@@ -47,6 +47,43 @@ export interface EncatchConfig {
    * can show a custom widget using the payload. Prefills are cleared when false.
    */
   onBeforeShowForm?: (payload: ShowFormInterceptorPayload) => boolean | Promise<boolean>;
+  /**
+   * Optional debug hook: called just before each API request is sent.
+   * Never receives the API key, headers, signature or request body.
+   */
+  onRequest?: (info: EncatchRequestInfo) => void;
+  /**
+   * Optional debug hook: called with the outcome of each API request, and for
+   * calls the SDK skipped without sending (outcome "skipped", with a reason).
+   * Never receives the API key, headers, signature or response body.
+   */
+  onResponse?: (info: EncatchResponseInfo) => void;
+}
+
+/** Passed to EncatchConfig.onRequest. */
+export interface EncatchRequestInfo {
+  /** API endpoint, e.g. "identify-user", "track-event", "show-form". */
+  endpoint: string;
+  /** 1 for the first try; higher when the SDK retries the same call. */
+  attempt: number;
+}
+
+/** Passed to EncatchConfig.onResponse. */
+export interface EncatchResponseInfo {
+  /** API endpoint, e.g. "identify-user", "track-event", "show-form". */
+  endpoint: string;
+  /** 1 for the first try; higher when the SDK retries the same call. */
+  attempt: number;
+  /** HTTP status, or 0 when there was no response (network error, timeout, skipped). */
+  status: number;
+  /** Time from sending to the response, in ms (0 when skipped). */
+  durationMs: number;
+  /** "ok" (2xx), "error" (other status), "network-error" (no response), or "skipped" (not sent). */
+  outcome: 'ok' | 'error' | 'network-error' | 'skipped';
+  /** True when the API answered 429, or the call was skipped because of a 429 pause. */
+  rateLimited: boolean;
+  /** Why a call was skipped without being sent (only when outcome is "skipped"). */
+  reason?: 'rate-limited' | 'collapsed' | 'duplicate' | 'signature-expired' | 'visitor' | 'survey-open';
 }
 
 // ============================================================================
@@ -283,6 +320,9 @@ export interface IdentifyUserRequest {
 
 export interface IdentifyUserResponse {
   message: string;
+  /** Survey the server picked for this person (shown after onPageDelay seconds). */
+  nextFeedbackId?: string;
+  onPageDelay?: number;
   userId?: string;
   formConfigurationId?: string;
   pingAgainIn?: number;
@@ -299,6 +339,9 @@ export interface TrackEventRequest {
 
 export interface TrackEventResponse {
   message: string;
+  /** Survey the server picked for this person (shown after onPageDelay seconds). */
+  nextFeedbackId?: string;
+  onPageDelay?: number;
   formConfigurationId?: string;
   pingAgainIn?: number;
   pingOnNextPageVisit?: boolean;
@@ -372,6 +415,9 @@ export interface PingRequest {
 
 export interface PingResponse {
   message: string;
+  /** Survey the server picked for this person (shown after onPageDelay seconds). */
+  nextFeedbackId?: string;
+  onPageDelay?: number;
   action?: string;
   formConfigurationId?: string;
   pingAgainIn?: number;
@@ -630,6 +676,12 @@ export interface ShowFormPayload {
 export interface EncatchInternalEvents {
   showForm: ShowFormPayload;
   dismissForm: { formConfigurationId?: string };
+  /** The user closed a survey (its X) before the final submit: a dismissal. */
+  closedBeforeSubmit: { formConfigurationId?: string };
+  /** EncatchProvider's automatic session start at launch (skipped while a stopSession() is in effect). */
+  startSessionOnLaunch: Record<string, never>;
+  /** A screen from EncatchProvider's navigation tracker (automatic; not sent while stopped). */
+  autoTrackScreen: { screenName: string };
   sendToWebView: SDKMessage;
   /** Fired when user identity changes — identified (userName + userId present) or cleared */
   userIdentified: { userName: string | null; userId: string | null };

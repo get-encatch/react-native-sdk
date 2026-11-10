@@ -1,0 +1,24 @@
+# DV4–DV6: identified user tracks a screen (SCREEN) that has an automatic survey;
+# waits up to SURVEY_TIMEOUT ms for it, then closes it.
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- runFlow: ../common/login.yaml
+- tapOn: { id: tab-events }
+- scrollUntilVisible:
+    element: { id: events-track-screen }
+    direction: DOWN
+- tapOn: { id: events-custom-screen }
+- eraseText: 40
+- inputText: ${SCREEN}
+- pressKey: Enter
+- scrollUntilVisible:
+    element: { id: events-track-screen }
+    direction: DOWN
+- tapOn: { id: events-track-screen }
+- runFlow:
+    file: wait-dev-survey.yaml
+    env:
+      SURVEY_TIMEOUT: ${SURVEY_TIMEOUT}
+- runFlow: close-dev-survey.yaml
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

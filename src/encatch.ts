@@ -23,6 +23,9 @@ import {
   clearUserName,
   getUserId,
   setUserId,
+  getUserSignature,
+  setUserSignature,
+  clearUserSignature,
   clearUserId,
   getFeedbackTransactions,
   setFeedbackTransactions,
@@ -44,7 +47,9 @@ import {
   getAppVersion,
   getTimezone,
 } from './device-info';
-import { enqueue, flush, startAppStateListener, stopAppStateListener } from './retry-queue';
+import { currentQueueAttempt, enqueue, flush, removeQueued, startAppStateListener, stopAppStateListener } from './retry-queue';
+import { HttpError, httpStatusOf, parseRetryAfter } from './http-error';
+import { bucketOf, clearPauses, isPaused, pauseFor, pauseRemainingMs } from './rate-limit';
 import { createEncatchLogger, type EncatchLogger } from './logger';
 import { resolvePresentationTarget } from './form-presentation-registry';
 import { cancelPendingCompletionCta } from './pendingCompletionCta';
@@ -77,6 +82,7 @@ import type {
   SubmitFormRequest,
   SubmitFormResponse,
   EncatchInternalEvents,
+  EncatchResponseInfo,
   QnaWithAiRequest,
   UploadFileRequest,
   UploadFileResponse,
@@ -86,7 +92,45 @@ import type {
 // SDK version (kept in sync with package.json by the build process)
 // ============================================================================
 
-const SDK_VERSION = '2.0.0';
+/**
+ * Replaced at build time with the version from package.json (tsup `define`, and
+ * the same `define` in vitest.config.ts). release-it bumps package.json, so the
+ * reported $sdkVersion can't drift from the published version again. (1.4.3 and
+ * earlier reported a hardcoded "2.0.0".)
+ */
+declare const __ENCATCH_SDK_VERSION__: string;
+const SDK_VERSION: string =
+  typeof __ENCATCH_SDK_VERSION__ === 'string' ? __ENCATCH_SDK_VERSION__ : '0.0.0-unknown';
+
+/** Longest a single API request may take before it is aborted (see _post). */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** submit-form attempts in all when the API answers 429 (see submitForm). */
+const SUBMIT_MAX_ATTEMPTS = 3;
+
+/** Survey submits kept while the secure signature is expired (oldest dropped first). */
+const MAX_HELD_SUBMITS = 10;
+
+/** Identical trackEvent / trackScreen calls within this window are sent once. */
+const COLLAPSE_WINDOW_MS = 1_000;
+
+/** JSON with object keys sorted and Dates as ISO strings, so equal values give equal strings. */
+function stableKey(value: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (v instanceof Date) return v.toISOString();
+    if (Array.isArray(v)) return v.map(norm);
+    if (v && typeof v === 'object') {
+      return Object.keys(v as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = norm((v as Record<string, unknown>)[k]);
+          return acc;
+        }, {});
+    }
+    return v;
+  };
+  return JSON.stringify(norm(value)) ?? '';
+}
 
 // ============================================================================
 // API Endpoint paths
@@ -116,6 +160,12 @@ export const _internalEmitter = new TypedEmitter<EncatchInternalEvents>();
 // Encatch singleton
 // ============================================================================
 
+/** "engage-product/encatch/api/v2/encatch/track-event" → "track-event". */
+function endpointName(endpoint: string): string {
+  const i = endpoint.indexOf('/encatch/');
+  return i >= 0 ? endpoint.slice(endpoint.lastIndexOf('/encatch/') + '/encatch/'.length) : endpoint;
+}
+
 class EncatchSDK {
   // Initialisation state
   private _initialized = false;
@@ -131,6 +181,14 @@ class EncatchSDK {
   private _userName: string | null = null;
   private _userId: string | null = null;
   private _userSignature: string | null = null;
+  /** generatedDateTimeinUTC of the stored signature (keys with a session time). */
+  private _userSignatureTime: string | null = null;
+  /**
+   * The stored session-time signature expired (the gateway answered 401). Until
+   * the app identifies again: background calls are skipped, submits are held.
+   */
+  private _signatureExpired = false;
+  private _heldSubmits: SubmitFormRequest[] = [];
 
   // Preferences
   private _locale: string | null = null;
@@ -156,6 +214,12 @@ class EncatchSDK {
   // Whether a form is currently visible (suppresses ping)
   private _isFormVisible = false;
 
+  // Show-form guard: forms being requested, the form on screen (requested id and
+  // server id), and the one pending delayed automatic show.
+  private _loadingFormIds = new Set<string>();
+  private _openFormIds: string[] = [];
+  private _pendingAutoShow: ReturnType<typeof setTimeout> | null = null;
+
   // Session control state
   private _isSessionPaused = false;
   private _isSessionStopped = false;
@@ -167,8 +231,17 @@ class EncatchSDK {
   // Event callbacks (external SDK consumers via Encatch.on())
   private _eventCallbacks: EventCallback[] = [];
 
+  // Dedupe: the last identify sent or in flight, and recent event / screen calls.
+  private _lastIdentifyKey: string | null = null;
+  private _lastEventAt = new Map<string, number>();
+  private _lastScreen: { name: string; at: number } | null = null;
+
   // Interceptor (optional — called before showing any form)
   private _onBeforeShowForm: EncatchConfig['onBeforeShowForm'] = undefined;
+
+  // Optional debug hooks (never given the API key, headers, signature or bodies).
+  private _onRequest: EncatchConfig['onRequest'] = undefined;
+  private _onResponse: EncatchConfig['onResponse'] = undefined;
 
   // Logger (uses react-native-logs when debugMode and package installed)
   private _logger: EncatchLogger = createEncatchLogger(false);
@@ -196,6 +269,8 @@ class EncatchSDK {
       this._theme = config.theme;
     }
     this._onBeforeShowForm = config?.onBeforeShowForm;
+    this._onRequest = config?.onRequest;
+    this._onResponse = config?.onResponse;
 
     this._logger.debug('Initializing SDK...');
 
@@ -224,6 +299,10 @@ class EncatchSDK {
       );
     }
 
+    // A stopSession() from a previous run stays in effect until startSession() or a
+    // successful identify (matches the web SDK).
+    this._isSessionStopped = await getSessionStopped();
+
     // Restore locale / country from previous session (matches web SDK hydration)
     if (prefs.locale != null) this._locale = prefs.locale;
     if (prefs.country != null) this._country = prefs.country;
@@ -231,12 +310,21 @@ class EncatchSDK {
     if (storedName) {
       this._userName = storedName;
       this._userId = await getUserId(storedName);
+      await this._loadStoredSignature(storedName);
       this._feedbackTransactions = await getFeedbackTransactions(storedName);
     } else {
       this._feedbackTransactions = await getFeedbackTransactions('anonymous');
     }
 
     this._initialized = true;
+    // Survey X-close before submit, reported by the form views (once, even if init runs again).
+    _internalEmitter.off('closedBeforeSubmit', this._closedBeforeSubmitListener);
+    _internalEmitter.on('closedBeforeSubmit', this._closedBeforeSubmitListener);
+    // EncatchProvider's automatic session start and screen tracking (respect stopSession()).
+    _internalEmitter.off('startSessionOnLaunch', this._startSessionOnLaunchListener);
+    _internalEmitter.on('startSessionOnLaunch', this._startSessionOnLaunchListener);
+    _internalEmitter.off('autoTrackScreen', this._autoTrackScreenListener);
+    _internalEmitter.on('autoTrackScreen', this._autoTrackScreenListener);
 
     // Start retry queue AppState listener
     startAppStateListener();
@@ -257,8 +345,43 @@ class EncatchSDK {
     options?: IdentifyOptions
   ): Promise<void> {
     if (!this._initialized) return;
+    // Identity changes run one after the other, so a resetUser() fired just
+    // before (and not awaited) finishes first and can't undo this identify.
+    return this._runIdentityOp(() => this._identifyNow(userName, traits, options));
+  }
 
-    this._userName = userName;
+  private async _identifyNow(
+    userName: string,
+    traits?: UserTraits,
+    options?: IdentifyOptions
+  ): Promise<void> {
+    // Skip a call identical to the last identify sent or still in flight. The
+    // key is cleared if that identify is dropped, and on resetUser / clearAll.
+    const identifyKey = stableKey({
+      userName,
+      traits: traits ?? null,
+      locale: options?.locale ?? null,
+      country: options?.country ?? null,
+      signature: options?.secure?.signature ?? null,
+      signatureTime: options?.secure?.generatedDateTimeinUTC ?? null,
+    });
+    if (identifyKey === this._lastIdentifyKey) {
+      this._logger.debug(`identifyUser "${userName}" skipped: same as the last identify`);
+      this._reportSkipped('identify-user', 'duplicate');
+      return;
+    }
+    this._lastIdentifyKey = identifyKey;
+
+    // Switching user: take this user's stored id (or none) together with the
+    // name, so a request never pairs this name with another user's id. With no
+    // stored id, requests go out as a visitor until the identify reply arrives
+    // (the server rejects a name without its id).
+    if (userName !== this._userName) {
+      const storedId = await getUserId(userName);
+      this._userName = userName;
+      this._userId = storedId;
+      await this._loadStoredSignature(userName);
+    }
     await setUserName(userName);
 
     // Apply locale/country from IdentifyOptions if provided
@@ -292,21 +415,49 @@ class EncatchSDK {
     const req: IdentifyUserRequest = {
       userName,
       userId: this._userId ?? undefined,
-      userSignature: options?.secure?.signature ?? this._userSignature ?? undefined,
+      userSignature: options?.secure?.signature ?? undefined,
       $deviceInfo: deviceInfo,
       userAttributes,
       $feedbackTransactions: this._feedbackTransactions ?? undefined,
     };
 
+    // While tracking is paused after a 429, hold only the latest identify: it is
+    // sent when the pause ends, so a sign-in during a pause isn't lost and
+    // repeated calls don't pile up.
+    if (isPaused('tracking')) removeQueued('identifyUser');
+
     enqueue('identifyUser', async () => {
       const res = await this._post<IdentifyUserResponse>(ENDPOINTS.IDENTIFY_USER, req, {
+        identifyUserName: userName,
+        signature: options?.secure?.signature,
         signatureTime: options?.secure?.generatedDateTimeinUTC,
       });
+      // A reply for a user who is no longer current (reset or switched since):
+      // keep the id for that user, but don't apply it.
+      if (this._userName !== userName) {
+        if (res.userId) await setUserId(userName, res.userId);
+        this._logger.debug(`identify reply for "${userName}" ignored: no longer the current user`);
+        return;
+      }
       // Persist server-issued userId
       if (res.userId) {
         this._userId = res.userId;
         await setUserId(userName, res.userId);
       }
+      // Secure identify: from now on the signature (and its time) go on every
+      // request for this user, and survive restarts. An identify without
+      // `secure` clears them.
+      const secure = options?.secure;
+      if (secure?.signature) {
+        this._userSignature = secure.signature;
+        this._userSignatureTime = secure.generatedDateTimeinUTC ?? null;
+        await setUserSignature(userName, { signature: secure.signature, time: this._userSignatureTime });
+      } else {
+        this._userSignature = null;
+        this._userSignatureTime = null;
+        await clearUserSignature(userName);
+      }
+      this._endSignatureExpired();
       if (res.$feedbackTransactions) {
         this._feedbackTransactions = res.$feedbackTransactions;
         await setFeedbackTransactions(userName, res.$feedbackTransactions);
@@ -328,10 +479,11 @@ class EncatchSDK {
         this._scheduleNextPing(res.pingAgainIn * 1000);
       }
 
-      // Auto show form if server requested it
-      if (res.formConfigurationId) {
-        this._showFormById(res.formConfigurationId, { triggerType: 'automatic' });
-      }
+      // Survey the server picked for this user
+      this._handleSurveyInReply(res);
+    }, undefined, () => {
+      // Dropped without succeeding: allow the same identify to be sent again.
+      if (this._lastIdentifyKey === identifyKey) this._lastIdentifyKey = null;
     });
 
     // Immediately flush so identify is best-effort real-time
@@ -364,6 +516,29 @@ class EncatchSDK {
     if (!this._initialized) return;
     // Skip tracking in fullscreen mode (matches web SDK)
     if (this._isFullScreen) return;
+    // Rate limited (429): skip new events until the pause ends.
+    if (isPaused('tracking')) {
+      this._logger.debug(`trackEvent "${eventName}" skipped: rate limited`);
+      this._reportSkipped('track-event', 'rate-limited');
+      return;
+    }
+    if (this._signatureExpired) {
+      this._logger.debug(`trackEvent skipped: secure signature expired, waiting for identify`);
+      this._reportSkipped('track-event', 'signature-expired');
+      return;
+    }
+    // Collapse the same event fired again within COLLAPSE_WINDOW_MS.
+    const now = Date.now();
+    const lastAt = this._lastEventAt.get(eventName);
+    if (lastAt != null && now - lastAt < COLLAPSE_WINDOW_MS) {
+      this._logger.debug(`trackEvent "${eventName}" collapsed (same event within ${COLLAPSE_WINDOW_MS} ms)`);
+      this._reportSkipped('track-event', 'collapsed');
+      return;
+    }
+    this._lastEventAt.set(eventName, now);
+    if (this._lastEventAt.size > 200) {
+      for (const [name, at] of this._lastEventAt) if (now - at >= COLLAPSE_WINDOW_MS) this._lastEventAt.delete(name);
+    }
 
     const deviceInfo = await this._buildDeviceInfo();
     const req: TrackEventRequest = {
@@ -380,9 +555,7 @@ class EncatchSDK {
         await setFeedbackTransactions(key, res.$feedbackTransactions);
       }
       this._handleResponseMeta(res);
-      if (res.formConfigurationId) {
-        this._showFormById(res.formConfigurationId, { triggerType: 'automatic' });
-      }
+      this._handleSurveyInReply(res);
     });
 
     flush().catch(() => {});
@@ -394,6 +567,23 @@ class EncatchSDK {
    */
   async _trackFormEvent(eventName: string, feedbackConfigurationId?: string): Promise<void> {
     if (!this._initialized) return;
+    if (isPaused('tracking')) {
+      this._reportSkipped('track-event', 'rate-limited');
+      return;
+    }
+    if (this._signatureExpired) {
+      this._reportSkipped('track-event', 'signature-expired');
+      return;
+    }
+    // Survey events (form:show, form:started, …) are only accepted for an
+    // identified user; the server rejects them from visitors with 403. So they're
+    // sent only when the request would carry both identity headers (this also
+    // skips them during a new user's first identify, before the id arrives).
+    if (!(this._userName && this._userId)) {
+      this._logger.debug(`survey event "${eventName}" not sent: no identified user`);
+      this._reportSkipped('track-event', 'visitor');
+      return;
+    }
     const deviceInfo = await this._buildDeviceInfo();
     const req: TrackEventRequest = {
       eventName,
@@ -409,9 +599,7 @@ class EncatchSDK {
         await setFeedbackTransactions(key, res.$feedbackTransactions);
       }
       this._handleResponseMeta(res);
-      if (res.formConfigurationId) {
-        this._showFormById(res.formConfigurationId, { triggerType: 'automatic' });
-      }
+      this._handleSurveyInReply(res);
     } catch {
       /* best effort — do not throw */
     }
@@ -423,6 +611,27 @@ class EncatchSDK {
     if (this._isFullScreen) return;
 
     this._currentScreen = screenName;
+    // Rate limited (429): the current screen is still remembered (it goes with
+    // the next ping), but no request is sent until the pause ends.
+    if (isPaused('tracking')) {
+      this._logger.debug(`trackScreen "${screenName}" skipped: rate limited`);
+      this._reportSkipped('track-screen', 'rate-limited');
+      return;
+    }
+    if (this._signatureExpired) {
+      this._logger.debug(`trackScreen skipped: secure signature expired, waiting for identify`);
+      this._reportSkipped('track-screen', 'signature-expired');
+      return;
+    }
+    // Collapse only when the screen hasn't changed since the last one tracked
+    // (a quick /home → /cart → /home is still sent in full).
+    const screenAt = Date.now();
+    if (this._lastScreen && this._lastScreen.name === screenName && screenAt - this._lastScreen.at < COLLAPSE_WINDOW_MS) {
+      this._logger.debug(`trackScreen "${screenName}" collapsed (same screen within ${COLLAPSE_WINDOW_MS} ms)`);
+      this._reportSkipped('track-screen', 'collapsed');
+      return;
+    }
+    this._lastScreen = { name: screenName, at: screenAt };
 
     const deviceInfo = await this._buildDeviceInfo(screenName);
     const req: TrackScreenRequest = {
@@ -438,15 +647,7 @@ class EncatchSDK {
         await setFeedbackTransactions(key, res.$feedbackTransactions);
       }
       this._handleResponseMeta(res);
-      if (res.formConfigurationId) {
-        this._showFormById(res.formConfigurationId, { triggerType: 'automatic' });
-      }
-      if (res.nextFeedbackId) {
-        const delay = typeof res.onPageDelay === 'number' ? res.onPageDelay : 0;
-        setTimeout(() => {
-          this._showFormById(res.nextFeedbackId!, { triggerType: 'automatic', reset: 'always' });
-        }, delay * 1000);
-      }
+      this._handleSurveyInReply(res);
     });
 
     flush().catch(() => {});
@@ -465,9 +666,42 @@ class EncatchSDK {
     formId: string,
     options?: InternalShowFormOptions
   ): Promise<void> {
+    if (isPaused('show-form')) {
+      this._logger.debug(`showForm "${formId}" skipped: rate limited`);
+      this._reportSkipped('show-form', 'rate-limited');
+      return;
+    }
+    const triggerType = options?.triggerType ?? 'manual';
+    // Automatic (server-chosen) shows never interrupt a survey that is loading or
+    // on screen, modal or inline. A manual show is ignored only for the same form
+    // while it is loading or open, so answers in progress aren't lost; a manual
+    // show for a different form still replaces the open one.
+    if (triggerType === 'automatic') {
+      if (this._signatureExpired || this._loadingFormIds.size > 0 || this._isFormVisible) {
+        this._logger.debug(`automatic showForm "${formId}" ignored: a survey is already loading or open`);
+        this._reportSkipped('show-form', this._signatureExpired ? 'signature-expired' : 'survey-open');
+        return;
+      }
+    } else if (this._loadingFormIds.has(formId) || (this._isFormVisible && this._openFormIds.includes(formId))) {
+      this._logger.debug(`showForm "${formId}" ignored: that survey is already loading or open`);
+      this._reportSkipped('show-form', 'duplicate');
+      return;
+    }
+    this._loadingFormIds.add(formId);
+    try {
+      await this._requestAndShowForm(formId, triggerType, options);
+    } finally {
+      this._loadingFormIds.delete(formId);
+    }
+  }
+
+  private async _requestAndShowForm(
+    formId: string,
+    triggerType: 'automatic' | 'manual',
+    options?: InternalShowFormOptions
+  ): Promise<void> {
     cancelPendingCompletionCta(formId);
     const resetMode = options?.reset ?? 'always';
-    const triggerType = options?.triggerType ?? 'manual';
 
     // Serialize context: convert Date values to ISO strings
     const serializedContext = options?.context
@@ -540,6 +774,7 @@ class EncatchSDK {
       });
 
       this._isFormVisible = true;
+      this._openFormIds = [formId, res.feedbackConfigurationId].filter((id): id is string => !!id);
     } catch (err) {
       this._logger.warn('showForm API error:', err);
     }
@@ -553,16 +788,111 @@ class EncatchSDK {
     this._showFormInternal(formConfigurationId, options).catch(() => {});
   }
 
+  /**
+   * A survey the server picked in a reply to identify-user, track-event (including
+   * survey events), track-screen or ping. The server sends nextFeedbackId +
+   * onPageDelay; formConfigurationId is still read for older servers. Every
+   * source goes through the same single pending show, so duplicates can't stack.
+   */
+  private _handleSurveyInReply(res: { nextFeedbackId?: string; onPageDelay?: number; formConfigurationId?: string }): void {
+    if (res.nextFeedbackId) this._scheduleAutoShow(res.nextFeedbackId, res.onPageDelay);
+    else if (res.formConfigurationId) this._scheduleAutoShow(res.formConfigurationId, 0);
+  }
+
+  /**
+   * A survey the server picked (nextFeedbackId), shown after onPageDelay seconds.
+   * Only one can be pending: later ones are ignored until it has run, and none is
+   * scheduled while a survey is loading or open.
+   */
+  private _scheduleAutoShow(formId: string, onPageDelay?: number): void {
+    if (this._signatureExpired) {
+      this._reportSkipped('show-form', 'signature-expired');
+      return;
+    }
+    if (this._pendingAutoShow || this._loadingFormIds.size > 0 || this._isFormVisible) {
+      this._logger.debug(`automatic survey "${formId}" ignored: one is already pending, loading or open`);
+      this._reportSkipped('show-form', 'survey-open');
+      return;
+    }
+    const delaySec = typeof onPageDelay === 'number' && onPageDelay > 0 ? onPageDelay : 0;
+    this._pendingAutoShow = setTimeout(() => {
+      this._pendingAutoShow = null;
+      this._showFormById(formId, { triggerType: 'automatic', reset: 'always' });
+    }, delaySec * 1000);
+  }
+
+  /** The open survey was closed, dismissed or cleared. */
+  private _markFormClosed(): void {
+    this._isFormVisible = false;
+    this._openFormIds = [];
+  }
+
+  private _cancelPendingAutoShow(): void {
+    if (this._pendingAutoShow) {
+      clearTimeout(this._pendingAutoShow);
+      this._pendingAutoShow = null;
+    }
+  }
+
   async dismissForm(formConfigurationId?: string): Promise<void> {
     if (!this._initialized) return;
 
     cancelPendingCompletionCta(formConfigurationId);
 
     _internalEmitter.emit('dismissForm', { formConfigurationId });
-    this._isFormVisible = false;
+    this._markFormClosed();
 
     this._trackFormEvent('form:dismissed', formConfigurationId).catch(() => {});
+    await this._sendDismiss(formConfigurationId);
+    this.emitEvent('form:dismissed', { formId: formConfigurationId ?? '' });
+  }
 
+  /**
+   * The user closed a survey with its X before the final submit (reported by the
+   * form views). For an identified user this is a dismissal: the form:dismissed
+   * survey event, the dismiss-form request and the app's form:dismissed event.
+   * Visitors get nothing, not even the local event. The view closes itself.
+   */
+  private async _onClosedBeforeSubmit(formConfigurationId?: string): Promise<void> {
+    if (!this._initialized) return;
+    if (!(this._userName && this._userId)) {
+      this._logger.debug('survey closed before submit: not a recorded dismissal for a visitor');
+      return;
+    }
+    this._trackFormEvent('form:dismissed', formConfigurationId).catch(() => {});
+    await this._sendDismiss(formConfigurationId);
+    this.emitEvent('form:dismissed', { formId: formConfigurationId ?? '' });
+  }
+
+  private readonly _closedBeforeSubmitListener = (p: { formConfigurationId?: string }) => {
+    this._onClosedBeforeSubmit(p.formConfigurationId).catch(() => {});
+  };
+
+  /** EncatchProvider starts the session at launch, unless a stopSession() is in effect. */
+  private readonly _startSessionOnLaunchListener = () => {
+    if (this._isSessionStopped) {
+      this._logger.debug('session not started at launch: stopSession() is in effect until startSession() or identifyUser()');
+      return;
+    }
+    this.startSession().catch(() => {});
+  };
+
+  /**
+   * A screen from EncatchProvider's navigation tracker. While stopped it isn't sent,
+   * but it's remembered, so startSession() tracks the current screen. (The app's own
+   * trackScreen() calls are still sent while stopped.)
+   */
+  private readonly _autoTrackScreenListener = (p: { screenName: string }) => {
+    if (this._isSessionStopped) {
+      if (this._initialized && !this._isFullScreen) this._currentScreen = p.screenName;
+      this._logger.debug(`automatic screen "${p.screenName}" not sent: stopSession() is in effect`);
+      return;
+    }
+    this.trackScreen(p.screenName).catch(() => {});
+  };
+
+  /** POST dismiss-form (best effort). */
+  private async _sendDismiss(formConfigurationId?: string): Promise<void> {
     const deviceInfo = await this._buildDeviceInfo();
     const req: DismissFormRequest = {
       formConfigurationId,
@@ -581,8 +911,6 @@ class EncatchSDK {
     } catch {
       /* silent — dismiss is best effort */
     }
-
-    this.emitEvent('form:dismissed', { formId: formConfigurationId ?? '' });
   }
 
   // ============================================================================
@@ -617,6 +945,11 @@ class EncatchSDK {
 
   async submitForm(params: SubmitFormRequest): Promise<void> {
     if (!this._initialized) return;
+    // Secure signature expired: hold the answers until the app identifies again.
+    if (this._signatureExpired) {
+      this._holdSubmit(params);
+      return;
+    }
 
     const deviceInfo = await this._buildDeviceInfo();
     const req: SubmitFormRequest = {
@@ -624,16 +957,30 @@ class EncatchSDK {
       $deviceInfo: deviceInfo as Record<string, unknown>,
     };
 
-    try {
-      const res = await this._post<SubmitFormResponse>(ENDPOINTS.SUBMIT_FORM, req);
-      if (res.$feedbackTransactions) {
-        this._feedbackTransactions = res.$feedbackTransactions;
-        const key = this._userName ?? 'anonymous';
-        await setFeedbackTransactions(key, res.$feedbackTransactions);
+    // A submit carries the user's answers, so it is never dropped for a 429: it
+    // waits for the pause to end and is retried, up to SUBMIT_MAX_ATTEMPTS times
+    // in all. Kept in memory only (lost if the app is killed meanwhile).
+    for (let attempt = 1; attempt <= SUBMIT_MAX_ATTEMPTS; attempt++) {
+      const wait = pauseRemainingMs('submit-form');
+      if (wait > 0) await new Promise<void>((resolve) => setTimeout(() => resolve(), wait));
+      try {
+        const res = await this._post<SubmitFormResponse>(ENDPOINTS.SUBMIT_FORM, req, { attempt });
+        if (res.$feedbackTransactions) {
+          this._feedbackTransactions = res.$feedbackTransactions;
+          const key = this._userName ?? 'anonymous';
+          await setFeedbackTransactions(key, res.$feedbackTransactions);
+        }
+        this._handleResponseMeta(res);
+        return;
+      } catch (err) {
+        if (httpStatusOf(err) === 429 && attempt < SUBMIT_MAX_ATTEMPTS) continue;
+        if (httpStatusOf(err) === 401 && this._signatureExpired) {
+          this._holdSubmit(params);
+          return;
+        }
+        this._logger.warn('submitForm API error:', err);
+        return;
       }
-      this._handleResponseMeta(res);
-    } catch (err) {
-      this._logger.warn('submitForm API error:', err);
     }
   }
 
@@ -822,8 +1169,7 @@ class EncatchSDK {
       xhr.setRequestHeader('X-Api-Key', this._apiKey!);
       if (this._sessionId) xhr.setRequestHeader('X-Session-Id', this._sessionId);
       if (this._deviceId) xhr.setRequestHeader('X-Device-Id', this._deviceId);
-      if (this._userName) xhr.setRequestHeader('X-User-Name', this._userName);
-      if (this._userId) xhr.setRequestHeader('X-User-Id', this._userId);
+      for (const [name, value] of Object.entries(this._identityHeaders())) xhr.setRequestHeader(name, value);
       if (this._userSignature) xhr.setRequestHeader('X-User-Signature', this._userSignature);
       if (this._appPackageName) xhr.setRequestHeader('Referer', this._appPackageName);
 
@@ -893,10 +1239,13 @@ class EncatchSDK {
     // Stop background activity
     this._stopPingInterval();
     stopAppStateListener();
+    clearPauses();
+    this._clearDedupe();
 
     // Dismiss any open form
     _internalEmitter.emit('dismissForm', {});
-    this._isFormVisible = false;
+    this._markFormClosed();
+    this._cancelPendingAutoShow();
 
     // Wipe every @encatch/ key from AsyncStorage in a single batch
     try {
@@ -915,6 +1264,11 @@ class EncatchSDK {
     this._userName = null;
     this._userId = null;
     this._userSignature = null;
+    this._userSignatureTime = null;
+    this._signatureExpired = false;
+    this._heldSubmits = [];
+    this._onRequest = undefined;
+    this._onResponse = undefined;
     this._feedbackTransactions = null;
     this._deviceId = null;
     this._sessionId = null;
@@ -986,9 +1340,12 @@ class EncatchSDK {
   }
 
   /**
-   * Fully suspends all SDK activity — stops the background ping and closes any
-   * open forms. User identity is preserved; no re-identification needed.
-   * Persists across app restarts via AsyncStorage. Re-enable with startSession().
+   * Stops what the SDK does on its own: the background ping and EncatchProvider's
+   * automatic screen tracking. Closes an open survey and cancels a pending automatic
+   * one. Saved, so it stays in effect across app restarts until startSession() or a
+   * successful identifyUser(). While stopped, the app's own calls (trackScreen,
+   * trackEvent, identifyUser, showForm, submits) still go out, and a survey the
+   * server picks in a reply still shows. User identity is kept.
    */
   async stopSession(): Promise<void> {
     if (this._isSessionStopped) return;
@@ -996,33 +1353,123 @@ class EncatchSDK {
     this._isSessionPaused = false;
     this._stopPingInterval();
     _internalEmitter.emit('dismissForm', {});
-    this._isFormVisible = false;
+    this._markFormClosed();
+    this._cancelPendingAutoShow();
     await setSessionStopped();
   }
 
+  private async _loadStoredSignature(userName: string): Promise<void> {
+    const stored = await getUserSignature(userName);
+    this._userSignature = stored?.signature ?? null;
+    this._userSignatureTime = stored?.time ?? null;
+  }
+
+  /** The stored session-time signature expired: warn once and wait for a new identify. */
+  private _onSignatureExpired(): void {
+    if (this._signatureExpired) return;
+    this._signatureExpired = true;
+    console.warn(
+      '[Encatch] Secure identify signature expired (401). Call identifyUser() with a fresh signature; ' +
+        'until then events, screens, ping and automatic surveys are skipped and survey submits are held.'
+    );
+    const user = this._userName;
+    this._userSignature = null;
+    this._userSignatureTime = null;
+    if (user) clearUserSignature(user).catch(() => {});
+  }
+
+  /** Calls a debug hook; a hook that throws or rejects can't affect the SDK. */
+  private _callHook<I>(hook: ((info: I) => void) | undefined, info: I): void {
+    if (!hook) return;
+    try {
+      const result: unknown = hook(info);
+      if (result && typeof (result as Promise<unknown>).then === 'function') {
+        (result as Promise<unknown>).then(undefined, () => {});
+      }
+    } catch {
+      /* ignore hook errors */
+    }
+  }
+
+  /** Reports a call the SDK skipped without sending it (onResponse, outcome "skipped"). */
+  private _reportSkipped(endpoint: string, reason: NonNullable<EncatchResponseInfo['reason']>): void {
+    this._callHook(this._onResponse, {
+      endpoint,
+      attempt: 1,
+      status: 0,
+      durationMs: 0,
+      outcome: 'skipped',
+      rateLimited: reason === 'rate-limited',
+      reason,
+    });
+  }
+
+  /** Keeps a submit until the next successful identify (in memory, at most 10). */
+  private _holdSubmit(params: SubmitFormRequest): void {
+    this._reportSkipped('submit-form', 'signature-expired');
+    this._heldSubmits.push(params);
+    if (this._heldSubmits.length > MAX_HELD_SUBMITS) this._heldSubmits.shift();
+    this._logger.debug('submitForm held until the next identify (secure signature expired)');
+  }
+
+  /** A successful identify ends the expired state and sends any held submits. */
+  private _endSignatureExpired(): void {
+    if (!this._signatureExpired && this._heldSubmits.length === 0) return;
+    this._signatureExpired = false;
+    const held = this._heldSubmits.splice(0);
+    for (const params of held) this.submitForm(params).catch(() => {});
+  }
+
+  /** Runs identify / reset operations one after the other, in call order. */
+  private _identityChain: Promise<unknown> = Promise.resolve();
+  private _runIdentityOp(op: () => Promise<void>): Promise<void> {
+    const run = this._identityChain.then(op, op);
+    this._identityChain = run.catch(() => {});
+    return run;
+  }
+
+  /** Forgets the last identify and recent event/screen calls (new user or full reset). */
+  private _clearDedupe(): void {
+    this._lastIdentifyKey = null;
+    this._lastEventAt.clear();
+    this._lastScreen = null;
+  }
+
   async resetUser(): Promise<void> {
-    if (this._userName) {
-      await Promise.all([
-        clearUserId(this._userName),
-        clearFeedbackTransactions(this._userName),
-      ]);
+    return this._runIdentityOp(() => this._resetNow());
+  }
+
+  private async _resetNow(): Promise<void> {
+    this._clearDedupe();
+    // Clear the in-memory identity first, so nothing is sent with a half-cleared one.
+    const previous = this._userName;
+    this._userName = null;
+    this._userId = null;
+    this._userSignature = null;
+    this._userSignatureTime = null;
+    this._signatureExpired = false;
+    if (this._heldSubmits.length > 0) {
+      console.warn(`[Encatch] ${this._heldSubmits.length} held survey submit(s) dropped: the user was reset`);
+      this._heldSubmits = [];
+    }
+    this._feedbackTransactions = null;
+    this._locale = null;
+    this._country = null;
+
+    if (previous) {
+      await Promise.all([clearUserId(previous), clearFeedbackTransactions(previous), clearUserSignature(previous)]);
     }
     await clearFeedbackTransactions('anonymous');
     await clearUserName();
     await clearSession();
     await clearPreferences();
 
-    this._userName = null;
-    this._userId = null;
-    this._userSignature = null;
-    this._feedbackTransactions = null;
-    this._locale = null;
-    this._country = null;
     this._sessionId = await getOrCreateSessionId();
 
-    // Reset session control flags
+    // Reset session control flags (a saved stopSession() too, like the web SDK)
     this._isSessionPaused = false;
     this._isSessionStopped = false;
+    await clearSessionStopped();
 
     this._stopPingInterval();
 
@@ -1046,6 +1493,10 @@ class EncatchSDK {
 
   private _stopPingInterval(): void {
     this._isPingActive = false;
+    this._clearPingTimers();
+  }
+
+  private _clearPingTimers(): void {
     if (this._pingIntervalId) {
       clearInterval(this._pingIntervalId);
       this._pingIntervalId = null;
@@ -1056,9 +1507,16 @@ class EncatchSDK {
     }
   }
 
+  /**
+   * The server asked for the next ping in `delayMs` (pingAgainIn). Pinging stays
+   * active while waiting, so every reply's pingAgainIn is honoured, including the
+   * scheduled ping's own reply. (Previously the wait marked pinging inactive, so
+   * that reply was ignored and the SDK fell back to 30 s: 0, 120, 150, 270, 300…)
+   */
   private _scheduleNextPing(delayMs: number): void {
-    this._stopPingInterval();
-    this._pingTimeoutId = setTimeout(async () => {
+    this._clearPingTimers();
+    const timeoutId = setTimeout(async () => {
+      if (this._pingTimeoutId === timeoutId) this._pingTimeoutId = null;
       if (!this._isFormVisible) {
         try {
           await this._doPing();
@@ -1066,11 +1524,22 @@ class EncatchSDK {
           /* ignore */
         }
       }
-      this._startPingInterval();
+      // Back to the regular interval, unless the reply already scheduled the next
+      // ping, or pinging was stopped (stopSession / pauseSession) in the meantime.
+      if (this._isPingActive && !this._pingTimeoutId && !this._pingIntervalId) this._startPingInterval();
     }, delayMs);
+    this._pingTimeoutId = timeoutId;
   }
 
   private async _doPing(): Promise<void> {
+    if (isPaused('tracking')) {
+      this._reportSkipped('ping', 'rate-limited');
+      return;
+    }
+    if (this._signatureExpired) {
+      this._reportSkipped('ping', 'signature-expired');
+      return;
+    }
     const deviceInfo = await this._buildDeviceInfo(this._currentScreen ?? undefined);
     const req: PingRequest = {
       $deviceInfo: deviceInfo,
@@ -1084,9 +1553,7 @@ class EncatchSDK {
       await setFeedbackTransactions(key, res.$feedbackTransactions);
     }
     this._handleResponseMeta(res);
-    if (res.formConfigurationId) {
-      this._showFormById(res.formConfigurationId, { triggerType: 'automatic' });
-    }
+    this._handleSurveyInReply(res);
   }
 
   // ============================================================================
@@ -1094,7 +1561,8 @@ class EncatchSDK {
   // ============================================================================
 
   setFormVisible(visible: boolean): void {
-    this._isFormVisible = visible;
+    if (visible) this._isFormVisible = true;
+    else this._markFormClosed();
   }
 
   // ============================================================================
@@ -1174,7 +1642,33 @@ class EncatchSDK {
    * Builds the auth headers used by _post() and raw fetch calls (e.g. streamQnaWithAi).
    * Does not include Content-Type so callers can set it (or omit it for multipart/form-data).
    */
-  private _buildHeaders(extra?: { signatureTime?: string }): Record<string, string> {
+  /**
+   * X-User-Name / X-User-Id. The core API rejects one without the other (401),
+   * so they go out both or neither; without an id the request is sent as a
+   * visitor. identify-user sends only its own user name, never an id: the
+   * gateway's secure-identify check needs the name, and the core API reads the
+   * identity from the body.
+   */
+  private _identityHeaders(identifyUserName?: string): Record<string, string> {
+    if (identifyUserName != null) return { 'X-User-Name': identifyUserName };
+    if (!(this._userName && this._userId)) return {};
+    const headers: Record<string, string> = { 'X-User-Name': this._userName, 'X-User-Id': this._userId };
+    // After a successful secure identify, the signature (and its time) go on every request.
+    if (this._userSignature) {
+      headers['X-User-Signature'] = this._userSignature;
+      if (this._userSignatureTime) {
+        headers['X-User-Session-Time'] = this._userSignatureTime;
+        headers['X-User-Signature-Time'] = this._userSignatureTime;
+      }
+    }
+    return headers;
+  }
+
+  private _buildHeaders(extra?: {
+    signature?: string;
+    signatureTime?: string;
+    identifyUserName?: string;
+  }): Record<string, string> {
     if (!this._apiKey) throw new Error('[Encatch] SDK not initialized');
 
     const headers: Record<string, string> = {
@@ -1183,11 +1677,17 @@ class EncatchSDK {
     };
 
     if (this._sessionId) headers['X-Session-Id'] = this._sessionId;
-    if (this._userName) headers['X-User-Name'] = this._userName;
-    if (this._userId) headers['X-User-Id'] = this._userId;
-    if (this._userSignature) headers['X-User-Signature'] = this._userSignature;
+    Object.assign(headers, this._identityHeaders(extra?.identifyUserName));
     if (this._deviceId) headers['X-Device-Id'] = this._deviceId;
-    if (extra?.signatureTime) headers['X-User-Signature-Time'] = extra.signatureTime;
+    // Secure identify. The gateway checks the signature on identify-user only,
+    // reading X-User-Signature and, for keys with a session time,
+    // X-User-Session-Time (the exact string signed with the user name).
+    // X-User-Signature-Time is kept for compatibility with earlier SDK versions.
+    if (extra?.signature) headers['X-User-Signature'] = extra.signature;
+    if (extra?.signatureTime) {
+      headers['X-User-Session-Time'] = extra.signatureTime;
+      headers['X-User-Signature-Time'] = extra.signatureTime;
+    }
     if (this._appPackageName) headers['Referer'] = this._appPackageName;
 
     return headers;
@@ -1196,27 +1696,69 @@ class EncatchSDK {
   private async _post<T>(
     endpoint: string,
     body: unknown,
-    opts?: { signatureTime?: string }
+    opts?: { signature?: string; signatureTime?: string; identifyUserName?: string; attempt?: number }
   ): Promise<T> {
     const url = `${this._apiBaseUrl}/${endpoint}`;
-    const headers = this._buildHeaders({ signatureTime: opts?.signatureTime });
+    const hookInfo = { endpoint: endpointName(endpoint), attempt: opts?.attempt ?? currentQueueAttempt() ?? 1 };
+    const headers = this._buildHeaders({
+      signature: opts?.signature,
+      signatureTime: opts?.signatureTime,
+      identifyUserName: opts?.identifyUserName,
+    });
 
     const bodyStr = JSON.stringify(body);
     if (this._debugMode) {
       const headersForLog = { ...headers };
       if (headersForLog['X-Api-Key']) headersForLog['X-Api-Key'] = '***';
+      if (headersForLog['X-User-Signature']) headersForLog['X-User-Signature'] = '***';
       this._logger.debug(`POST ${endpoint} -> ${url}`);
       this._logger.debug('Request headers:\n' + JSON.stringify(headersForLog, null, 2));
-      this._logger.debug('Request body:\n' + JSON.stringify(body, null, 2));
+      // The secure-identify signature is masked in the body too.
+      const bodyForLog =
+        body && typeof body === 'object' && (body as { userSignature?: unknown }).userSignature
+          ? { ...(body as Record<string, unknown>), userSignature: '***' }
+          : body;
+      this._logger.debug('Request body:\n' + JSON.stringify(bodyForLog, null, 2));
     }
+    this._callHook(this._onRequest, hookInfo);
+    const startedAt = Date.now();
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: bodyStr,
+    // A request that never answers would hold up the retry queue (it sends one
+    // request at a time), and React Native's fetch has no read timeout on
+    // Android. Abort after REQUEST_TIMEOUT_MS; the queue treats it like a
+    // network failure and retries with backoff.
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
+    let res: Response;
+    let responseText: string;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: bodyStr,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      responseText = await res.text().catch(() => '');
+    } catch (err) {
+      // No response: network failure or the REQUEST_TIMEOUT_MS abort.
+      this._callHook(this._onResponse, {
+        ...hookInfo,
+        status: 0,
+        durationMs: Date.now() - startedAt,
+        outcome: 'network-error',
+        rateLimited: false,
+      });
+      throw err;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+    this._callHook(this._onResponse, {
+      ...hookInfo,
+      status: res.status,
+      durationMs: Date.now() - startedAt,
+      outcome: res.ok ? 'ok' : 'error',
+      rateLimited: res.status === 429,
     });
-
-    const responseText = await res.text().catch(() => '');
     if (this._debugMode) {
       const resHeaders: Record<string, string> = {};
       res.headers.forEach((v, k) => { resHeaders[k] = v; });
@@ -1233,7 +1775,13 @@ class EncatchSDK {
     // Check for user_pending_retry_exhausted - stop SDK and reset user
     try {
       const parsedForCheck = JSON.parse(responseText);
-      if (parsedForCheck && typeof parsedForCheck === 'object' && parsedForCheck.user_pending_retry_exhausted === true) {
+      // The core API sends camelCase (userPendingRetryExhausted); snake_case is
+      // kept for older servers.
+      if (
+        parsedForCheck &&
+        typeof parsedForCheck === 'object' &&
+        (parsedForCheck.userPendingRetryExhausted === true || parsedForCheck.user_pending_retry_exhausted === true)
+      ) {
         console.log('USER identification timeout for encatch SDK');
         this._stopPingInterval();
         this.resetUser().catch(() => {});
@@ -1242,10 +1790,17 @@ class EncatchSDK {
       // not JSON or parse failed, ignore
     }
 
+    // A 401 on a request that carried the stored session-time signature: it has
+    // expired (the session time is meant to cover an app session).
+    if (res.status === 401 && !opts?.identifyUserName && headers['X-User-Signature'] && headers['X-User-Session-Time']) {
+      this._onSignatureExpired();
+    }
+
     if (!res.ok) {
-      const errMsg = `[Encatch API] ${endpoint} failed with status ${res.status}: ${responseText}`;
-      this._logger.warn(errMsg);
-      throw new Error(errMsg);
+      const err = new HttpError(endpoint, res.status, responseText, parseRetryAfter(res.headers.get('Retry-After')));
+      if (res.status === 429) pauseFor(bucketOf(endpoint), err.retryAfterMs);
+      this._logger.warn(err.message);
+      throw err;
     }
 
     return JSON.parse(responseText) as T;

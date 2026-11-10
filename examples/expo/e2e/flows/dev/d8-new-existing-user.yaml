@@ -1,0 +1,23 @@
+# DV8: a new user signs in, logs out, then signs in again as the same (now existing) user.
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- runFlow: ../common/login.yaml
+- tapOn: { id: tab-events }
+- tapOn: "Logout"
+- extendedWaitUntil:
+    visible: { id: setup-apply }
+    timeout: 20000
+- scrollUntilVisible:
+    element: ${USER}
+    direction: DOWN
+- tapOn: ${USER}
+- scrollUntilVisible:
+    element: { id: login-identify }
+    direction: DOWN
+- tapOn: { id: login-identify }
+- extendedWaitUntil:
+    visible: { id: home-track-event }
+    timeout: 20000
+- tapOn: { id: tab-events }
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

@@ -74,6 +74,7 @@ export default function HomeScreen() {
         placeholderColor={colors.tabIconDefault}
       />
       <Pressable
+        testID="home-show-form"
         style={({ pressed }) => [
           styles.button,
           pressed && styles.buttonPressed,
@@ -118,6 +119,7 @@ export default function HomeScreen() {
 
       <View style={styles.separator} lightColor="#eee" darkColor="rgba(255,255,255,0.1)" />
       <Pressable
+        testID="home-track-event"
         style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
         onPress={() => trackEvent('home_viewed')}>
         <Text style={styles.buttonText}>Track Event: home_viewed</Text>

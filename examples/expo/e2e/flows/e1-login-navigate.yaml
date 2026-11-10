@@ -1,0 +1,17 @@
+# E1: login → identify → navigate tabs.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn:
+    id: tab-events
+- tapOn:
+    id: tab-burst
+- tapOn:
+    id: tab-settings
+- tapOn:
+    id: tab-home
+- runFlow:
+    file: common/pause.yaml
+    env:
+      SECONDS: 3

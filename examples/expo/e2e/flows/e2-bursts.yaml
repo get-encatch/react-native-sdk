@@ -1,0 +1,30 @@
+# E2: each burst button on the Burst tab. The survey is closed before the reset+identify burst.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn:
+    id: tab-burst
+- tapOn:
+    id: burst-identify-same
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn:
+    id: burst-event-same
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn:
+    id: burst-event-different
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 4 } }
+- tapOn:
+    id: burst-screen-same
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn:
+    id: burst-survey-screen
+- runFlow: { file: common/wait-survey.yaml, env: { SURVEY_TIMEOUT: 20000 } }
+- tapOn: "Close"
+- extendedWaitUntil:
+    notVisible: "How would you rate the app\\?.*"
+    timeout: 10000
+# Last: the example app returns to the login screen while the user is reset.
+- tapOn:
+    id: burst-reset-identify
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 4 } }

@@ -1,0 +1,18 @@
+# Answers the mock survey (rating + text) in the WebView and submits it.
+appId: com.encatch.expotester
+---
+- extendedWaitUntil:
+    visible: "How would you rate the app\\?.*"
+    timeout: 20000
+- tapOn:
+    below: "How would you rate the app\\?.*"
+    above: "Anything else you would like to tell us\\?"
+    index: 3
+- tapOn:
+    below: "Anything else you would like to tell us\\?"
+    above: "Submit"
+- inputText: "great app"
+- tapOn: "Submit"
+- extendedWaitUntil:
+    notVisible: "How would you rate the app\\?.*"
+    timeout: 15000

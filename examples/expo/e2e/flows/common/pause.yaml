@@ -1,0 +1,7 @@
+# Waits SECONDS seconds (Maestro has no sleep: wait for text that never appears).
+appId: com.encatch.expotester
+---
+- extendedWaitUntil:
+    visible: "__never_shown_e2e_marker__"
+    timeout: ${SECONDS * 1000}
+    optional: true

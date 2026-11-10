@@ -1,0 +1,15 @@
+{
+  "note": "Copy to e2e/.results/dev-project.json (git-ignored) and fill in your own test project's values.",
+  "apiBaseUrl": "https://api.dev.encatch.com",
+  "webHost": "https://form.dev.encatch.com",
+  "projectId": 0,
+  "sdkKeyName": "your-publishable-key-name",
+  "sdkKey": "en-pk_dev_...",
+  "forms": {
+    "manual": { "id": "<form uuid>", "trigger": "manual only" },
+    "pageVisit": { "id": "<form uuid>", "trigger": "automatic: page visit, URL contains \"dev-page\"" },
+    "trackedEvent": { "id": "<form uuid>", "trigger": "automatic: tracked event dev_event, min count 1" },
+    "immediate": { "id": "<form uuid>", "trigger": "automatic: immediate, include pages containing \"dev-immediate\"" },
+    "delayed": { "id": "<form uuid>", "trigger": "automatic: delayed 20 s after session start, include pages containing \"dev-delayed\"" }
+  }
+}

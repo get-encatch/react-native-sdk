@@ -29,6 +29,9 @@ jobs:
       - name: SDK build
         run: pnpm build
 
+      - name: Tests (unit, mock API contract, 1.4.3 rate-limit characterisation, public API check)
+        run: pnpm test
+
       - name: Package contents
         run: pnpm pack:check
 

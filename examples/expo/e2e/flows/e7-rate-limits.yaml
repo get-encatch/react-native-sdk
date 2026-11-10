@@ -1,0 +1,15 @@
+# E7: a burst that hits 429, a survey submitted during the pause, then normal traffic after it.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: tab-burst }
+- tapOn: { id: burst-event-different }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn: { id: tab-home }
+- tapOn: { id: home-show-form }
+- runFlow: common/answer-survey.yaml
+# Outlast the pause (Retry-After ≤ 60 s).
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 65 } }
+- tapOn: { id: home-track-event }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }
