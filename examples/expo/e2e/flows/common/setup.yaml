@@ -1,0 +1,56 @@
+# Fresh install → environment → Save. Ends on the login screen.
+# Env: ENV (mock or dev), API_KEY, FORM_ID (used when ENV isn't mock), WAIT_LOGIN.
+appId: com.encatch.expotester
+---
+- launchApp:
+    clearState: true
+    permissions:
+      all: deny
+- extendedWaitUntil:
+    visible:
+      id: env-mock
+    timeout: 30000
+- tapOn:
+    id: env-${ENV}
+- runFlow:
+    when:
+      true: ${API_KEY != 'mock-api-key'}
+    commands:
+      - tapOn:
+          id: setup-api-key
+      - eraseText: 140
+      - inputText: ${API_KEY}
+      - pressKey: Enter
+# DEV (and other non-mock environments) start with an empty form id.
+- runFlow:
+    when:
+      true: ${ENV != 'mock'}
+    commands:
+      - tapOn:
+          id: setup-form-id
+      - eraseText: 60
+      - inputText: ${FORM_ID}
+      - pressKey: Enter
+- tapOn:
+    id: setup-save
+# Android asks for camera and microphone on first launch; the flows don't need them.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn:
+          text: "Don.t allow"
+          optional: true
+      - tapOn:
+          text: "Don.t allow"
+          optional: true
+# WAIT_LOGIN 'false': something (a visitor survey) may cover the login screen.
+- runFlow:
+    when:
+      true: ${WAIT_LOGIN != 'false'}
+    commands:
+      # The login screen's setup button, near the top (the rest may be below the fold).
+      - extendedWaitUntil:
+          visible:
+            id: setup-apply
+          timeout: 30000

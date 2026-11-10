@@ -54,6 +54,7 @@ export default function EventsScreen() {
               styles.input,
               { color: colors.text, borderColor: colors.tabIconDefault, flex: 1 },
             ]}
+            testID="events-custom-event"
             value={customEvent}
             onChangeText={setCustomEvent}
             placeholder="test_event"
@@ -66,6 +67,7 @@ export default function EventsScreen() {
               !customEvent.trim() && styles.disabled,
               pressed && styles.pressed,
             ]}
+            testID="events-fire"
             onPress={() => customEvent.trim() && trackEvent(customEvent.trim())}
             disabled={!customEvent.trim()}>
             <Text style={styles.actionButtonText}>Fire</Text>
@@ -92,6 +94,7 @@ export default function EventsScreen() {
               styles.input,
               { color: colors.text, borderColor: colors.tabIconDefault, flex: 1 },
             ]}
+            testID="events-custom-screen"
             value={customScreen}
             onChangeText={setCustomScreen}
             placeholder="/dashboard/encatch-test"
@@ -104,6 +107,7 @@ export default function EventsScreen() {
               !customScreen.trim() && styles.disabled,
               pressed && styles.pressed,
             ]}
+            testID="events-track-screen"
             onPress={() => customScreen.trim() && trackScreen(customScreen.trim())}
             disabled={!customScreen.trim()}>
             <Text style={styles.actionButtonText}>Track</Text>

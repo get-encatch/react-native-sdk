@@ -5,7 +5,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { Camera } from 'expo-camera';
 import { useCallback, useEffect, useState } from 'react';
 
-import { EncatchProvider, EncatchWebView } from '@encatch/react-native-sdk';
+import { Encatch, EncatchProvider, EncatchWebView } from '@encatch/react-native-sdk';
 import { useColorScheme } from '@/components/useColorScheme';
 import { CtaNavigationHandler } from '@/components/CtaNavigationHandler';
 import { InterceptorCarousel, type BlockedFormItem } from '@/components/InterceptorCarousel';
@@ -19,6 +19,7 @@ import {
 import { TestUsersProvider } from '@/contexts/TestUsersContext';
 import { TesterSessionProvider } from '@/contexts/TesterSessionContext';
 import { getEnvironmentEndpoints } from '@/constants/environments';
+import { mockDebugHooks, reportFormShown, reportSdkEvent, reportsToLocalCollector } from '@/constants/mockTools';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -48,6 +49,12 @@ export default function RootLayout() {
   }
 
   return <RootLayoutNav />;
+}
+
+/** Mock and DEV only: reports the SDK's app events (form:show, form:dismissed, …) for the E2E flows. */
+function SdkEventReporter({ enabled }: { enabled: boolean }) {
+  useEffect(() => (enabled ? Encatch.on(reportSdkEvent) : undefined), [enabled]);
+  return null;
 }
 
 async function requestMediaPermissions() {
@@ -94,7 +101,11 @@ function EncatchAppInner({
         apiBaseUrl: endpoints.apiBaseUrl,
         webHost: endpoints.webHost,
         debugMode: true,
+        // Mock and DEV only: report the SDK's debug hooks to the local collector for the E2E flows.
+        ...(reportsToLocalCollector(setupValues.environment) ? mockDebugHooks : {}),
         onBeforeShowForm: async (payload) => {
+          // Mock and DEV only: tells the E2E flows which form the SDK is about to show.
+          if (reportsToLocalCollector(setupValues.environment)) reportFormShown(payload.formId);
           const interceptorId = interceptorFormId.trim();
           if (interceptorId && payload.formId === interceptorId) {
             const formConfig = payload.formConfig as BlockedFormItem['formConfig'];
@@ -107,6 +118,7 @@ function EncatchAppInner({
       }}
       navigationType="expo-router">
       <EncatchWebView />
+      <SdkEventReporter enabled={reportsToLocalCollector(setupValues.environment)} />
       <CtaNavigationHandler />
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
         <Stack screenOptions={{ headerShown: false }}>

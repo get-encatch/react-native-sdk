@@ -1,0 +1,44 @@
+# From the login screen: create USER, pick the SIGNATURE option (none / valid /
+# wrong) and identify. Waits for Home unless WAIT_HOME is 'false'.
+appId: com.encatch.expotester
+---
+- scrollUntilVisible:
+    element:
+      id: login-new-user
+    direction: DOWN
+- tapOn:
+    id: login-new-user
+- tapOn:
+    id: login-username
+- inputText: ${USER}
+- pressKey: Enter
+- scrollUntilVisible:
+    element:
+      id: login-save-user
+    direction: DOWN
+- tapOn:
+    id: login-save-user
+- runFlow:
+    when:
+      true: ${SIGNATURE != 'none'}
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: login-signature-${SIGNATURE}
+          direction: DOWN
+      - tapOn:
+          id: login-signature-${SIGNATURE}
+- scrollUntilVisible:
+    element:
+      id: login-identify
+    direction: DOWN
+- tapOn:
+    id: login-identify
+- runFlow:
+    when:
+      true: ${WAIT_HOME != 'false'}
+    commands:
+      - extendedWaitUntil:
+          visible:
+            id: home-track-event
+          timeout: 20000

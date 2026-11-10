@@ -1,0 +1,11 @@
+# E4b: the track-event reply carries a survey; the button is tapped several times.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn:
+    id: home-track-event
+    repeat: 3
+    delay: 100
+- runFlow: { file: common/wait-survey.yaml, env: { SURVEY_TIMEOUT: 20000 } }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }

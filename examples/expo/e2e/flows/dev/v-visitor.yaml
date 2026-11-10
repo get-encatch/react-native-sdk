@@ -1,0 +1,31 @@
+# Visitor checks on the login screen (not identified). ACTION: screen | event | show;
+# VALUE: the screen or event name. Then either submits (SUBMIT=true) or closes with the X.
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- tapOn: { id: visitor-value }
+- eraseText: 40
+- inputText: ${VALUE}
+- pressKey: Enter
+- runFlow:
+    when: { true: "${ACTION == 'screen'}" }
+    commands:
+      - tapOn: { id: visitor-track-screen }
+- runFlow:
+    when: { true: "${ACTION == 'event'}" }
+    commands:
+      - tapOn: { id: visitor-track-event }
+- runFlow:
+    when: { true: "${ACTION == 'show'}" }
+    commands:
+      - tapOn: { id: visitor-show-form }
+- runFlow:
+    when: { true: "${SUBMIT == 'true'}" }
+    commands:
+      - runFlow: answer-dev-survey.yaml
+- runFlow:
+    when: { true: "${SUBMIT != 'true'}" }
+    commands:
+      - runFlow: { file: wait-dev-survey.yaml, env: { SURVEY_TIMEOUT: 25000 } }
+      - runFlow: close-dev-survey.yaml
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

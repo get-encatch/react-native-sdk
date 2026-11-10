@@ -1,0 +1,8 @@
+# E5: answer and submit a survey.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: home-show-form }
+- runFlow: common/answer-survey.yaml
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 4 } }

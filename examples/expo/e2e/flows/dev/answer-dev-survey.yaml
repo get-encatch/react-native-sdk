@@ -1,0 +1,28 @@
+# Answers the dev test survey (welcome → rating + long answer → thank-you) and closes
+# the thank-you screen with its X.
+appId: com.encatch.expotester
+---
+- extendedWaitUntil:
+    visible: "Welcome to the RN SDK test survey"
+    timeout: 25000
+- tapOn: "Get Started"
+- extendedWaitUntil:
+    visible: "How would you rate.*"
+    timeout: 10000
+- tapOn:
+    below: "How would you rate.*"
+    above: "Poor"
+    index: 3
+- tapOn:
+    below: "Describe how the application fits.*"
+    above: "Submit"
+- inputText: "RN SDK hotfix dev test"
+- tapOn: "Submit"
+- extendedWaitUntil:
+    visible: "Thank you! Your input makes a difference."
+    timeout: 15000
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn: "Close"
+- extendedWaitUntil:
+    notVisible: "Thank you! Your input makes a difference."
+    timeout: 10000
