@@ -14,7 +14,7 @@ importers:
     devDependencies:
       '@encatch/schema':
         specifier: ^1.5.2
-        version: 1.5.2(zod@4.6.5)
+        version: 1.5.2(zod@4.6.7)
       '@react-native-async-storage/async-storage':
         specifier: 2.2.0
         version: 2.2.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))
@@ -58,8 +58,8 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/node@26.6.4)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1)
       zod:
-        specifier: ^4.0.0
-        version: 4.6.5
+        specifier: ^4.6.7
+        version: 4.6.7
 
   examples/bare:
     dependencies:
@@ -6359,8 +6359,8 @@ packages:
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
-  zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zxing-wasm@3.1.3:
     resolution: {integrity: sha512-3lC9BJk4fR5ZJxcGjb0hVnDFOW7KpLXHIebiBmVd4FDRQZVeObztoTKxRUPxlWwSgxrMRONK0u50hBD1aTYEKg==}
@@ -7283,12 +7283,12 @@ snapshots:
       expo-web-browser: 55.0.20(expo@55.0.31)(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))
       react-native-logs: 5.6.0
 
-  '@encatch/schema@1.5.2(zod@4.6.5)':
+  '@encatch/schema@1.5.2(zod@4.6.7)':
     dependencies:
       '@types/node': 25.9.9
       typescript: 6.0.3
       uuid: 14.0.2
-      zod: 4.6.5
+      zod: 4.6.7
 
   '@esbuild/aix-ppc64@0.27.7':
     optional: true
@@ -10471,8 +10471,8 @@ snapshots:
       '@babel/parser': 7.29.9
       eslint: 8.57.1(supports-color@8.1.1)
       hermes-parser: 0.25.1
-      zod: 4.6.5
-      zod-validation-error: 4.0.2(zod@4.6.5)
+      zod: 4.6.7
+      zod-validation-error: 4.0.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
 
@@ -13789,13 +13789,13 @@ snapshots:
 
   yoctocolors@2.2.0: {}
 
-  zod-validation-error@4.0.2(zod@4.6.5):
+  zod-validation-error@4.0.2(zod@4.6.7):
     dependencies:
-      zod: 4.6.5
+      zod: 4.6.7
 
   zod@3.25.76: {}
 
-  zod@4.6.5: {}
+  zod@4.6.7: {}
 
   zxing-wasm@3.1.3:
     dependencies:
