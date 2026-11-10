@@ -15,6 +15,7 @@
  * ...) therefore stay missing, which is what exercises the SDK's
  * "optional peer not installed" code paths in the bare example.
  */
+const fs = require('fs');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..');
@@ -35,6 +36,18 @@ const packageName = (moduleName) =>
 function withEncatchSdk(config, appDir) {
   const appOrigin = path.join(appDir, 'package.json');
   const sdkOrigin = path.join(root, 'package.json');
+  // When the app installs the SDK from npm instead of the workspace (for example to
+  // test a published beta), pnpm keeps one copy shared by every app and links the
+  // other apps' optional peers next to it. Treat that copy like the repository's:
+  // its package imports resolve from this app, as with a plain npm install.
+  let installedSdkDirs = [];
+  try {
+    const installed = fs.realpathSync(path.join(appDir, 'node_modules', '@encatch', 'react-native-sdk'));
+    if (installed !== root) installedSdkDirs = ['src', 'dist', 'optional'].map((dir) => path.join(installed, dir) + path.sep);
+  } catch {
+    /* not installed */
+  }
+  const sdkFileDirs = [...sdkDirs, ...installedSdkDirs];
   const previousResolveRequest = config.resolver?.resolveRequest;
 
   return {
@@ -46,7 +59,7 @@ function withEncatchSdk(config, appDir) {
         const resolve = previousResolveRequest ?? context.resolveRequest;
         const origin = context.originModulePath;
         const isPackageImport = !moduleName.startsWith('.') && !path.isAbsolute(moduleName);
-        const fromSdkFiles = sdkDirs.some((dir) => origin.startsWith(dir));
+        const fromSdkFiles = sdkFileDirs.some((dir) => origin.startsWith(dir));
 
         if (isPackageImport && fromSdkFiles) {
           const resolveFrom = sdkRuntimeDeps.has(packageName(moduleName)) ? sdkOrigin : appOrigin;
