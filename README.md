@@ -31,6 +31,38 @@ Production defaults (override via `EncatchConfig` when needed):
 
 These are exported as `DEFAULT_API_BASE_URL` and `DEFAULT_WEB_HOST` from the package.
 
+## Camera and microphone permissions
+
+The SDK never asks for camera or microphone access by itself. The system prompt appears only when a form question needs it (for example a photo, video or audio answer), the first time that question is used. Your app controls this through the permissions it declares:
+
+- **No camera or microphone questions in your forms:** declare nothing. Your users are never asked.
+- **Forms with camera or microphone questions:** declare the permissions below. Without them, those questions can't capture anything.
+
+| Platform | What to add |
+|---|---|
+| Android (`AndroidManifest.xml`) | `<uses-permission android:name="android.permission.CAMERA" />` and `<uses-permission android:name="android.permission.RECORD_AUDIO" />` |
+| iOS (`Info.plist`) | `NSCameraUsageDescription` and `NSMicrophoneUsageDescription`, each with a sentence telling users why you need it |
+
+With Expo, add them in `app.json`:
+
+```json
+{
+  "expo": {
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow camera access to answer feedback questions with a photo or video.",
+        "NSMicrophoneUsageDescription": "Allow microphone access to answer feedback questions with audio."
+      }
+    },
+    "android": {
+      "permissions": ["CAMERA", "RECORD_AUDIO"]
+    }
+  }
+}
+```
+
+The [Expo example](examples/expo) asks for both permissions as soon as it starts so testers can try every question type. Your app doesn't need to do that.
+
 ## Repository layout
 
 | Path | What it is |
