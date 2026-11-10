@@ -18,7 +18,10 @@ import {
   ENCATCH_ENVIRONMENTS,
   type EncatchEnvironment,
   getEnvironmentEndpoints,
+  MOCK_API_KEY,
+  MOCK_FORM_ID,
 } from '@/constants/environments';
+import { mockSignIdentify, type MockSignature } from '@/constants/mockTools';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useTesterSession } from '@/contexts/TesterSessionContext';
 import {
@@ -48,6 +51,7 @@ function EnvironmentPicker({
           return (
             <Pressable
               key={env}
+              testID={`env-${env}`}
               style={({ pressed }) => [
                 styles.envChip,
                 {
@@ -117,6 +121,7 @@ function SetupFields({
       <Text style={[styles.label, { color: colors.text }]}>API Key</Text>
       <TextInput
         style={[styles.input, { color: colors.text, borderColor: colors.tabIconDefault }]}
+        testID="setup-api-key"
         placeholder={envApiKeyHint ? `Build hint: ${envApiKeyHint}` : 'Enter API key'}
         placeholderTextColor={colors.tabIconDefault}
         value={apiKey}
@@ -127,6 +132,7 @@ function SetupFields({
       <Text style={[styles.label, { color: colors.text }]}>Feedback configuration ID</Text>
       <TextInput
         style={[styles.input, { color: colors.text, borderColor: colors.tabIconDefault }]}
+        testID="setup-form-id"
         placeholder={envFormIdHint ? `Build hint: ${envFormIdHint}` : 'Enter feedback configuration ID'}
         placeholderTextColor={colors.tabIconDefault}
         value={formId}
@@ -237,9 +243,17 @@ function LoginSetupOnly() {
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
-          onEnvironmentChange={setEnvironment}
+          onEnvironmentChange={(env) => {
+            setEnvironment(env);
+            // The local mock API accepts a fixed key and has built-in surveys.
+            if (env === 'mock') {
+              if (!apiKey.trim()) setApiKey(MOCK_API_KEY);
+              if (!formId.trim()) setFormId(MOCK_FORM_ID);
+            }
+          }}
         />
         <Pressable
+          testID="setup-save"
           style={[styles.button, (!canSave || saving) && styles.buttonDisabled]}
           onPress={() => void handleSave()}
           disabled={!canSave || saving}>
@@ -257,7 +271,8 @@ function LoginSetupOnly() {
 function LoginWithIdentify() {
   const { setupValues, updateSetup, changeSetup } = useTesterSession();
   const { users, isLoading, addUser } = useTestUsers();
-  const { identifyUser, isInitialized } = useEncatch();
+  const { identifyUser, isInitialized, trackScreen, trackEvent, showForm } = useEncatch();
+  const [visitorValue, setVisitorValue] = useState('/dev-page');
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
 
@@ -272,6 +287,7 @@ function LoginWithIdentify() {
   const [newDisplayName, setNewDisplayName] = useState('');
   const [loading, setLoading] = useState(false);
   const [applyingSetup, setApplyingSetup] = useState(false);
+  const [signature, setSignature] = useState<MockSignature>('none');
 
   useEffect(() => {
     setApiKey(setupValues.apiKey);
@@ -323,7 +339,13 @@ function LoginWithIdentify() {
     if (!user) return;
 
     setLoading(true);
-    identifyUser(user.username, buildIdentifyTraits(user));
+    if (environment === 'mock' && signature !== 'none') {
+      // Secure mode: the mock stands in for the customer's backend that signs the name.
+      const secure = await mockSignIdentify(user.username, trimmedApiKey, signature);
+      identifyUser(user.username, buildIdentifyTraits(user), { secure });
+    } else {
+      identifyUser(user.username, buildIdentifyTraits(user));
+    }
     setLoading(false);
   };
 
@@ -369,7 +391,14 @@ function LoginWithIdentify() {
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
-          onEnvironmentChange={setEnvironment}
+          onEnvironmentChange={(env) => {
+            setEnvironment(env);
+            // The local mock API accepts a fixed key and has built-in surveys.
+            if (env === 'mock') {
+              if (!apiKey.trim()) setApiKey(MOCK_API_KEY);
+              if (!formId.trim()) setFormId(MOCK_FORM_ID);
+            }
+          }}
         />
 
         {setupDirty ? (
@@ -380,6 +409,7 @@ function LoginWithIdentify() {
 
         <View style={styles.setupActions}>
           <Pressable
+            testID="setup-apply"
             style={({ pressed }) => [
               styles.secondaryButton,
               (!canApplySetup || applyingSetup) && styles.buttonDisabled,
@@ -400,6 +430,43 @@ function LoginWithIdentify() {
           </Pressable>
         </View>
 
+        {environment === 'mock' || environment === 'dev' ? (
+          // Mock and DEV only: lets the E2E flows drive the SDK as a visitor (not identified yet).
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>SDK checks (visitor)</Text>
+            <TextInput
+              testID="visitor-value"
+              style={[styles.input, { color: colors.text, borderColor: colors.tabIconDefault }]}
+              value={visitorValue}
+              onChangeText={setVisitorValue}
+              placeholder="/dev-page or dev_event"
+              placeholderTextColor={colors.tabIconDefault}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.envRow}>
+              <Pressable
+                testID="visitor-track-screen"
+                style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+                onPress={() => visitorValue.trim() && trackScreen(visitorValue.trim())}>
+                <Text style={styles.secondaryButtonText}>Track screen</Text>
+              </Pressable>
+              <Pressable
+                testID="visitor-track-event"
+                style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+                onPress={() => visitorValue.trim() && trackEvent(visitorValue.trim())}>
+                <Text style={styles.secondaryButtonText}>Track event</Text>
+              </Pressable>
+              <Pressable
+                testID="visitor-show-form"
+                style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+                onPress={() => trimmedFormId && showForm(trimmedFormId)}>
+                <Text style={styles.secondaryButtonText}>Show form</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Saved users</Text>
           {users.length === 0 ? (
@@ -419,6 +486,7 @@ function LoginWithIdentify() {
 
           {!showNewUser ? (
             <Pressable
+              testID="login-new-user"
               style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
               onPress={() => setShowNewUser(true)}>
               <Text style={styles.secondaryButtonText}>+ New user</Text>
@@ -428,6 +496,7 @@ function LoginWithIdentify() {
               <Text style={[styles.label, { color: colors.text }]}>Username</Text>
               <TextInput
                 style={[styles.input, { color: colors.text, borderColor: colors.tabIconDefault }]}
+                testID="login-username"
                 placeholder="user_123"
                 placeholderTextColor={colors.tabIconDefault}
                 value={newUsername}
@@ -457,6 +526,7 @@ function LoginWithIdentify() {
                   <Text style={[styles.link, { color: colors.tabIconDefault }]}>Cancel</Text>
                 </Pressable>
                 <Pressable
+                  testID="login-save-user"
                   style={({ pressed }) => [
                     styles.secondaryButton,
                     !newUsername.trim() && styles.buttonDisabled,
@@ -484,7 +554,30 @@ function LoginWithIdentify() {
           </Pressable>
         ) : null}
 
+        {environment === 'mock' ? (
+          <View style={styles.section}>
+            <Text style={[styles.label, { color: colors.text }]}>Secure mode signature (mock only)</Text>
+            <View style={styles.envRow}>
+              {(['none', 'valid', 'wrong'] as const).map((kind) => (
+                <Pressable
+                  key={kind}
+                  testID={`login-signature-${kind}`}
+                  style={[
+                    styles.envChip,
+                    { borderColor: signature === kind ? '#3B82F6' : colors.tabIconDefault },
+                  ]}
+                  onPress={() => setSignature(kind)}>
+                  <Text style={[styles.envChipText, { color: signature === kind ? '#3B82F6' : colors.text }]}>
+                    {kind}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
         <Pressable
+          testID="login-identify"
           style={[styles.button, (!canIdentify || loading) && styles.buttonDisabled]}
           onPress={() => void handleIdentify()}
           disabled={!canIdentify || loading}>

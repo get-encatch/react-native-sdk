@@ -1,15 +1,28 @@
 /**
- * Offline retry queue for failed API calls.
+ * Retry queue for identifyUser / trackEvent / trackScreen calls.
  *
- * - Persisted to AsyncStorage so requests survive app restarts.
- * - Automatically flushed when the app comes to the foreground (AppState).
- * - Max 3 retries per request with exponential backoff (1s → 2s → 4s).
- * - Does NOT retry on 4xx client errors (401, 404, etc.) — these won't succeed on retry.
- * - Retries 5xx server errors and network failures.
- * - Only retries safe idempotent calls: identifyUser, trackEvent, trackScreen.
+ * - One flush runs at a time. flush() while a flush is running joins it and
+ *   makes it run once more, so a request is never sent twice while it is in
+ *   flight or after it succeeded.
+ * - Requests go out one at a time, in the order they were queued.
+ * - 4xx client errors (400, 401, 404, …) are dropped and the flush carries on
+ *   with the next item.
+ * - 429: the item is dropped (not retried) and the queue pauses for Retry-After
+ *   (see rate-limit.ts). Items behind it are held, then sent once the pause ends.
+ * - 5xx and network failures are retried with backoff (2 s, then 4 s): at most
+ *   3 attempts in total, then dropped. A backed-off item waits without holding
+ *   up the items behind it.
+ * - Flushed again when the app comes to the foreground (AppState).
+ * - Labels are persisted to AsyncStorage for debugging only; queued calls are
+ *   not replayed after an app restart.
  */
 import { AppState, type AppStateStatus } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { httpStatusOf } from './http-error';
+import { isPaused, onPauseEnd, pauseFor, pauseRemainingMs } from './rate-limit';
+
+/** Everything in this queue (identify, track-event, track-screen) counts against this bucket. */
+const BUCKET = 'tracking' as const;
 
 const QUEUE_KEY = '@encatch/retry_queue';
 const MAX_RETRIES = 3;
@@ -31,24 +44,37 @@ interface QueuedRequest {
   maxRetries: number;
   createdAt: number;
   label: string;
+  /** Not sent before this time (backoff after a failure). */
+  nextAttemptAt: number;
+  /** Called when the item is dropped without succeeding. */
+  onDrop?: () => void;
 }
 
-// In-memory queue (runtime) — populated from AsyncStorage on init
 const queue: QueuedRequest[] = [];
-// Factory registry: label -> fn factory, used to recreate fns after app restart
-const fnRegistry = new Map<string, (() => () => Promise<unknown>) | null>();
+
+/** Attempt number (1 = first) of the item whose request is being started. */
+let sendingAttempt: number | null = null;
+
+/** Attempt number of the queued call currently starting its request, if any. */
+export function currentQueueAttempt(): number | null {
+  return sendingAttempt;
+}
+
+/** The flush in progress, if any. */
+let running: Promise<void> | null = null;
+/** Set when flush() is called during a flush: run through the queue once more. */
+let runAgain = false;
+/** Timer that flushes when the earliest backed-off item is due. */
+let wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ============================================================================
 // Internal helpers
 // ============================================================================
 
-/** 4xx client errors should not be retried — they won't succeed. */
+/** 4xx client errors are not retried — they won't succeed. */
 function isClientError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  const match = msg.match(/status (\d+)/);
-  if (!match) return false;
-  const status = parseInt(match[1], 10);
-  return status >= 400 && status < 500;
+  const status = httpStatusOf(err);
+  return status != null && status >= 400 && status < 500;
 }
 
 function backoffMs(retries: number): number {
@@ -70,16 +96,78 @@ async function persistQueue(): Promise<void> {
   }
 }
 
-async function removeFromPersisted(id: string): Promise<void> {
+function remove(item: QueuedRequest): void {
+  const idx = queue.indexOf(item);
+  if (idx !== -1) queue.splice(idx, 1);
+}
+
+/** Removes an item that did not succeed and tells its owner. */
+function drop(item: QueuedRequest): void {
+  remove(item);
   try {
-    const raw = await AsyncStorage.getItem(QUEUE_KEY);
-    if (!raw) return;
-    const items: SerializableQueueItem[] = JSON.parse(raw);
-    const filtered = items.filter((i) => i.id !== id);
-    await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(filtered));
+    item.onDrop?.();
   } catch {
     /* ignore */
   }
+}
+
+/** Sends every item that is due, in order, once. */
+async function runOnce(): Promise<void> {
+  for (const item of [...queue]) {
+    // Paused after a 429: hold the rest until the pause ends (onPauseEnd flushes).
+    if (isPaused(BUCKET)) return;
+    if (!queue.includes(item)) continue;
+    if (item.nextAttemptAt > Date.now()) continue;
+
+    try {
+      // The item's fn calls _post synchronously at its start, which reads this.
+      sendingAttempt = item.retries + 1;
+      const sending = item.fn();
+      sendingAttempt = null;
+      await sending;
+      remove(item);
+      await persistQueue();
+    } catch (err) {
+      sendingAttempt = null;
+      if (httpStatusOf(err) === 429) {
+        drop(item);
+        await persistQueue();
+        pauseFor(BUCKET, (err as { retryAfterMs?: number })?.retryAfterMs);
+        console.warn(`[Encatch] Retry queue: dropping "${item.label}" (rate limited, not retried)`, err);
+        return;
+      }
+      if (isClientError(err)) {
+        drop(item);
+        await persistQueue();
+        console.warn(`[Encatch] Retry queue: dropping "${item.label}" (client error, no retry)`, err);
+        continue;
+      }
+      item.retries += 1;
+      if (item.retries >= item.maxRetries) {
+        drop(item);
+        console.warn(`[Encatch] Retry queue: dropping "${item.label}" after ${item.maxRetries} retries`, err);
+      } else {
+        item.nextAttemptAt = Date.now() + backoffMs(item.retries);
+      }
+      await persistQueue();
+    }
+  }
+}
+
+/** Arranges a flush for when the earliest backed-off item becomes due. */
+function scheduleWake(): void {
+  if (wakeTimer) {
+    clearTimeout(wakeTimer);
+    wakeTimer = null;
+  }
+  if (queue.length === 0) return;
+  // While paused, onPauseEnd() flushes; otherwise wake for the next backed-off item.
+  if (isPaused(BUCKET)) return;
+  const next = Math.min(...queue.map((q) => q.nextAttemptAt));
+  wakeTimer = setTimeout(() => {
+    wakeTimer = null;
+    flush().catch(() => {});
+  }, Math.max(0, next - Date.now()));
 }
 
 // ============================================================================
@@ -92,99 +180,76 @@ async function removeFromPersisted(id: string): Promise<void> {
  * @param label   Human-readable label used for debugging and log output.
  * @param fn      The async function to execute. Should be a closure capturing
  *                the current request payload.
- * @param maxRetries  Override default max retries (default: 3).
+ * @param maxRetries  Override default max attempts (default: 3).
+ * @param onDrop  Called if the call is dropped without succeeding.
  */
 export function enqueue(
   label: string,
   fn: () => Promise<unknown>,
-  maxRetries: number = MAX_RETRIES
+  maxRetries: number = MAX_RETRIES,
+  onDrop?: () => void
 ): void {
-  const item: QueuedRequest = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  const now = Date.now();
+  queue.push({
+    id: `${now}-${Math.random().toString(36).slice(2)}`,
     fn,
     retries: 0,
     maxRetries,
-    createdAt: Date.now(),
+    createdAt: now,
     label,
-  };
-  queue.push(item);
+    nextAttemptAt: now,
+    onDrop,
+  });
   persistQueue();
 }
 
 /**
- * Attempt to flush all queued requests in order.
- * Successful items are removed. Failed items have their retry count incremented.
- * Items that exceed maxRetries are dropped.
+ * Sends every queued request that is due, one at a time, in order.
+ * If a flush is already running, this joins it and makes it go through the
+ * queue once more, so items added meanwhile are sent too.
  */
-export async function flush(): Promise<void> {
-  if (queue.length === 0) return;
-
-  // Work on a snapshot to avoid mutation issues during iteration
-  const snapshot = [...queue];
-
-  for (const item of snapshot) {
+export function flush(): Promise<void> {
+  if (running) {
+    runAgain = true;
+    return running;
+  }
+  running = (async () => {
     try {
-      await item.fn();
-      // Success: remove from in-memory queue and persisted storage
-      const idx = queue.findIndex((q) => q.id === item.id);
-      if (idx !== -1) queue.splice(idx, 1);
-      await removeFromPersisted(item.id);
-    } catch (err) {
-      if (isClientError(err)) {
-        // 4xx client errors — don't retry, drop immediately
-        const idx = queue.findIndex((q) => q.id === item.id);
-        if (idx !== -1) queue.splice(idx, 1);
-        await removeFromPersisted(item.id);
-        console.warn(`[Encatch] Retry queue: dropping "${item.label}" (client error, no retry)`, err);
-        return;
-      }
-      item.retries += 1;
-      if (item.retries >= item.maxRetries) {
-        // Exhausted: drop the item
-        const idx = queue.findIndex((q) => q.id === item.id);
-        if (idx !== -1) queue.splice(idx, 1);
-        await removeFromPersisted(item.id);
-        console.warn(`[Encatch] Retry queue: dropping "${item.label}" after ${item.maxRetries} retries`, err);
-      } else {
-        // Schedule a deferred retry with exponential backoff
-        const delay = backoffMs(item.retries);
-        setTimeout(() => flushSingle(item.id), delay);
-        await persistQueue();
-      }
+      do {
+        runAgain = false;
+        await runOnce();
+      } while (runAgain);
+    } finally {
+      running = null;
+      scheduleWake();
     }
-  }
+  })();
+  return running;
 }
 
-async function flushSingle(id: string): Promise<void> {
-  const item = queue.find((q) => q.id === id);
-  if (!item) return;
-
-  try {
-    await item.fn();
-    const idx = queue.findIndex((q) => q.id === id);
-    if (idx !== -1) queue.splice(idx, 1);
-    await removeFromPersisted(id);
-  } catch (err) {
-    if (isClientError(err)) {
-      const idx = queue.findIndex((q) => q.id === id);
-      if (idx !== -1) queue.splice(idx, 1);
-      await removeFromPersisted(id);
-      console.warn(`[Encatch] Retry queue: dropping "${item.label}" (client error, no retry)`, err);
-      return;
-    }
-    item.retries += 1;
-    if (item.retries >= item.maxRetries) {
-      const idx = queue.findIndex((q) => q.id === id);
-      if (idx !== -1) queue.splice(idx, 1);
-      await removeFromPersisted(id);
-      console.warn(`[Encatch] Retry queue: dropping "${item.label}" after ${item.maxRetries} retries`, err);
-    } else {
-      const delay = backoffMs(item.retries);
-      setTimeout(() => flushSingle(id), delay);
-      await persistQueue();
-    }
-  }
+/** Removes queued (not yet sent) items with this label. Returns how many were removed. */
+export function removeQueued(label: string): number {
+  const before = queue.length;
+  for (const item of [...queue]) if (item.label === label) drop(item);
+  const removed = before - queue.length;
+  if (removed > 0) persistQueue();
+  return removed;
 }
+
+/** True while the queue's bucket is paused after a 429. */
+export function isQueuePaused(): boolean {
+  return isPaused(BUCKET);
+}
+
+/** Milliseconds until the queue's pause ends (0 when not paused). */
+export function queuePauseRemainingMs(): number {
+  return pauseRemainingMs(BUCKET);
+}
+
+// Send what was held as soon as a pause ends.
+onPauseEnd(() => {
+  flush().catch(() => {});
+});
 
 // ============================================================================
 // AppState listener: flush on foreground
@@ -224,6 +289,3 @@ export function stopAppStateListener(): void {
 export function queueSize(): number {
   return queue.length;
 }
-
-// Suppress unused variable warning for fnRegistry (used for future persistence recovery)
-void fnRegistry;

@@ -1,0 +1,5 @@
+appId: com.encatch.expotester
+---
+- extendedWaitUntil:
+    visible: "Welcome to the RN SDK test survey"
+    timeout: ${SURVEY_TIMEOUT}

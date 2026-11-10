@@ -14,6 +14,7 @@ import { uuidv7 } from 'uuidv7';
 const KEY_DEVICE_ID = '@encatch/device_id';
 const KEY_USER_NAME = '@encatch/user_name';
 const KEY_USER_ID_PREFIX = '@encatch/user_id_';
+const KEY_USER_SIGNATURE_PREFIX = '@encatch/user_signature_';
 const KEY_FT_PREFIX = '@encatch/ft_';
 const KEY_PREFERENCES = '@encatch/preferences';
 const KEY_SESSION_STOPPED = '@encatch/session_stopped';
@@ -110,6 +111,46 @@ export async function setUserId(userName: string, userId: string): Promise<void>
 export async function clearUserId(userName: string): Promise<void> {
   try {
     await AsyncStorage.removeItem(`${KEY_USER_ID_PREFIX}${userName}`);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ============================================================================
+// Secure identify signature (keyed by userName). Kept after a successful secure
+// identify and sent on every request for that user, so it survives restarts.
+// ============================================================================
+
+export interface StoredSignature {
+  signature: string;
+  /** generatedDateTimeinUTC as given (epoch ms string), when the key has a session time. */
+  time: string | null;
+}
+
+export async function getUserSignature(userName: string): Promise<StoredSignature | null> {
+  try {
+    const raw = await AsyncStorage.getItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.signature === 'string'
+      ? { signature: parsed.signature, time: typeof parsed.time === 'string' ? parsed.time : null }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setUserSignature(userName: string, value: StoredSignature): Promise<void> {
+  try {
+    await AsyncStorage.setItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function clearUserSignature(userName: string): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
   } catch {
     /* ignore */
   }

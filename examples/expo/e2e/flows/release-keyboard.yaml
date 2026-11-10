@@ -1,0 +1,26 @@
+# RELEASING.md test matrix, Android keyboard check (run by hand on Android 13, 14 and 15):
+# open a form, type a short and then a long answer, close the keyboard. Screenshots
+# show whether the dialog sits just above the keyboard, its title stays below the
+# status bar, and it drops back when the keyboard closes.
+#   maestro --device <id> test -e MOCK_URL=http://localhost:8787 -e USER=kb_check -e API_KEY=mock-api-key \
+#     -e SIGNATURE=none -e WAIT_HOME=true -e WAIT_LOGIN=true flows/release-keyboard.yaml
+# Maestro saves the screenshots under ~/.maestro/tests/<run>/release-keyboard/.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: home-show-form }
+- extendedWaitUntil:
+    visible: "How would you rate the app\\?.*"
+    timeout: 20000
+- takeScreenshot: 1-form-open
+- tapOn:
+    below: "Anything else you would like to tell us\\?"
+    above: "Submit"
+- inputText: "Short answer"
+- takeScreenshot: 2-short-answer-keyboard
+- inputText: " and now a much longer answer that keeps going so the text box has to grow over several lines, then a little more text to push it further down the dialog while the keyboard is open."
+- takeScreenshot: 3-long-answer-keyboard
+- hideKeyboard
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- takeScreenshot: 4-keyboard-closed

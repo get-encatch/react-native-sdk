@@ -1,0 +1,12 @@
+# E9: logout (resetUser), then straight away log in as another user.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: "Logout"
+- runFlow:
+    file: common/login.yaml
+    env:
+      USER: ${USER2}
+- tapOn: { id: tab-events }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }

@@ -1,0 +1,8 @@
+# E8: secure identify with a valid or wrong signature (API_KEY, SIGNATURE set by the runner).
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: { file: common/login.yaml, env: { WAIT_HOME: 'false' } }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 4 } }
+- tapOn: { id: tab-events, optional: true }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }

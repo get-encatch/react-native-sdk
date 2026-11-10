@@ -1,0 +1,5 @@
+appId: com.encatch.expotester
+---
+- extendedWaitUntil:
+    visible: "How would you rate the app\\?.*"
+    timeout: ${SURVEY_TIMEOUT}

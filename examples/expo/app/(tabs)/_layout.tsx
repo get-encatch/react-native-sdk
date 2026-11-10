@@ -12,6 +12,7 @@ import { TesterHeaderActions } from '@/components/TesterHeaderActions';
 function TabsWithEncatch() {
   const colorScheme = useColorScheme();
   const { isInitialized, isIdentified } = useEncatch();
+  const { setupValues } = useTesterSession();
 
   if (!isInitialized) return null;
   if (!isIdentified) return <Redirect href="/(auth)/login" />;
@@ -26,6 +27,7 @@ function TabsWithEncatch() {
       <Tabs.Screen
         name="index"
         options={{
+          tabBarButtonTestID: 'tab-home',
           title: 'Home',
           tabBarIcon: ({ color }) => (
             <SymbolView
@@ -39,6 +41,7 @@ function TabsWithEncatch() {
       <Tabs.Screen
         name="events"
         options={{
+          tabBarButtonTestID: 'tab-events',
           title: 'Events',
           tabBarIcon: ({ color }) => (
             <SymbolView
@@ -50,8 +53,25 @@ function TabsWithEncatch() {
         }}
       />
       <Tabs.Screen
+        name="burst"
+        options={{
+          tabBarButtonTestID: 'tab-burst',
+          title: 'Burst',
+          // Only against the local mock API.
+          href: setupValues.environment === 'mock' ? undefined : null,
+          tabBarIcon: ({ color }) => (
+            <SymbolView
+              name={{ ios: 'bolt', android: 'bolt', web: 'bolt' }}
+              tintColor={color}
+              size={28}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="settings"
         options={{
+          tabBarButtonTestID: 'tab-settings',
           title: 'Settings',
           tabBarIcon: ({ color }) => (
             <SymbolView
@@ -65,6 +85,7 @@ function TabsWithEncatch() {
       <Tabs.Screen
         name="inline-wildcard"
         options={{
+          tabBarButtonTestID: 'tab-inline-wildcard',
           title: 'Inline (Any)',
           tabBarIcon: ({ color }) => (
             <SymbolView
@@ -78,6 +99,7 @@ function TabsWithEncatch() {
       <Tabs.Screen
         name="inline-exact"
         options={{
+          tabBarButtonTestID: 'tab-inline-exact',
           title: 'Inline (Exact)',
           tabBarIcon: ({ color }) => (
             <SymbolView

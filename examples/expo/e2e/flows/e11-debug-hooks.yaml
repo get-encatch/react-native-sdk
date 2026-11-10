@@ -1,0 +1,9 @@
+# E11: debug hooks (the example reports them to the mock in the Mock environment).
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: tab-events }
+- tapOn: { id: tab-burst }
+- tapOn: { id: burst-event-same }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 4 } }

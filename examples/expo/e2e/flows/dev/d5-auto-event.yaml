@@ -1,0 +1,17 @@
+# DV5: identified user fires dev_event, which has an automatic survey.
+appId: com.encatch.expotester
+---
+- runFlow: ../common/setup.yaml
+- runFlow: ../common/login.yaml
+- tapOn: { id: tab-events }
+- tapOn: { id: events-custom-event }
+- eraseText: 40
+- inputText: dev_event
+- pressKey: Enter
+- scrollUntilVisible:
+    element: { id: events-fire }
+    direction: DOWN
+- tapOn: { id: events-fire }
+- runFlow: { file: wait-dev-survey.yaml, env: { SURVEY_TIMEOUT: 25000 } }
+- runFlow: close-dev-survey.yaml
+- runFlow: { file: ../common/pause.yaml, env: { SECONDS: 4 } }

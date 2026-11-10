@@ -16,6 +16,7 @@ import React, {
   useContext,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -149,13 +150,20 @@ function isRouteSkipped(path: string, skippedRoutes: string[]): boolean {
 // Expo Router tracker sub-component
 // ============================================================================
 
-const ExpoRouterTracker: React.FC<{ skippedRoutes: string[] }> = ({ skippedRoutes }) => {
+/**
+ * Tracks a screen only when the path changes. The hooks can return new
+ * array/object identities on every render, which re-ran this effect and sent the
+ * same screen again. `ready` (the SDK has finished init) lets the first screen be
+ * sent as soon as init finishes: calls before that are ignored by the SDK.
+ */
+const ExpoRouterTracker: React.FC<{ skippedRoutes: string[]; ready: boolean }> = ({ skippedRoutes, ready }) => {
   const segments = useSegments?.() ?? [];
   const pathname = usePathname?.() ?? '';
   const params = useGlobalSearchParams?.() ?? {};
+  const lastPathRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!pathname) return;
+    if (!pathname || !ready) return;
 
     // Extract dynamic segment names from the segments array
     const pathParamKeys = segments
@@ -172,10 +180,13 @@ const ExpoRouterTracker: React.FC<{ skippedRoutes: string[] }> = ({ skippedRoute
     let fullPath = pathname;
     if (params['#']) fullPath += `#${params['#']}`;
 
+    if (fullPath === lastPathRef.current) return;
+    lastPathRef.current = fullPath;
     if (isRouteSkipped(fullPath, skippedRoutes)) return;
 
-    Encatch.trackScreen(fullPath);
-  }, [pathname, segments, params]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Automatic screen: not sent while stopSession() is in effect (the SDK decides).
+    _internalEmitter.emit('autoTrackScreen', { screenName: fullPath });
+  }, [pathname, segments, params, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return null;
 };
@@ -184,11 +195,13 @@ const ExpoRouterTracker: React.FC<{ skippedRoutes: string[] }> = ({ skippedRoute
 // React Navigation tracker sub-component
 // ============================================================================
 
-const ReactNavigationTracker: React.FC<{ skippedRoutes: string[] }> = ({ skippedRoutes }) => {
+/** Same rules as ExpoRouterTracker: once per route change, first route once ready. */
+const ReactNavigationTracker: React.FC<{ skippedRoutes: string[]; ready: boolean }> = ({ skippedRoutes, ready }) => {
   const navigationState = useNavigationState?.((state: any) => state);
+  const lastPathRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!navigationState) return;
+    if (!navigationState || !ready) return;
 
     const getActiveRoute = (state: any): { path: string; params: Record<string, any> } => {
       if (!state?.routes) return { path: '/', params: {} };
@@ -211,11 +224,14 @@ const ReactNavigationTracker: React.FC<{ skippedRoutes: string[] }> = ({ skipped
       return buildPath(state);
     };
 
-    const { path, params } = getActiveRoute(navigationState);
-    if (!path || isRouteSkipped(path, skippedRoutes)) return;
+    const { path } = getActiveRoute(navigationState);
+    if (!path || path === lastPathRef.current) return;
+    lastPathRef.current = path;
+    if (isRouteSkipped(path, skippedRoutes)) return;
 
-    Encatch.trackScreen(path);
-  }, [navigationState]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Automatic screen: not sent while stopSession() is in effect (the SDK decides).
+    _internalEmitter.emit('autoTrackScreen', { screenName: path });
+  }, [navigationState, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return null;
 };
@@ -248,7 +264,8 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
       // loaded userName + userId from AsyncStorage, so we can read them synchronously.
       setIsIdentified(!!Encatch.userName && !!Encatch.userId);
       setUserName(Encatch.userName);
-      await Encatch.startSession();
+      // Automatic start at launch: skipped while a saved stopSession() is in effect.
+      _internalEmitter.emit('startSessionOnLaunch', {});
     });
 
     return () => {
@@ -342,34 +359,61 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
 
   // ── Context value ─────────────────────────────────────────────────────────
 
-  const contextValue: EncatchContextValue = {
-    isInitialized,
-    isIdentified,
-    userName,
-    identifyUser,
-    setLocale,
-    setCountry,
-    setTheme,
-    trackEvent,
-    trackScreen,
-    showForm,
-    dismissForm,
-    addToResponse,
-    resetUser,
-    on,
-    off,
-    submitForm,
-    emitEvent,
-    refineText,
-  };
+  // Memoised: a new object on every render made every useEncatch() consumer
+  // re-render, and re-ran effects that depend on it (e.g. a trackEvent in a
+  // useEffect with the context as a dependency). It changes only when its
+  // values change: init, identify / reset / user switch. The functions are
+  // stable for the provider's lifetime.
+  const contextValue = useMemo<EncatchContextValue>(
+    () => ({
+      isInitialized,
+      isIdentified,
+      userName,
+      identifyUser,
+      setLocale,
+      setCountry,
+      setTheme,
+      trackEvent,
+      trackScreen,
+      showForm,
+      dismissForm,
+      addToResponse,
+      resetUser,
+      on,
+      off,
+      submitForm,
+      emitEvent,
+      refineText,
+    }),
+    [
+      isInitialized,
+      isIdentified,
+      userName,
+      identifyUser,
+      setLocale,
+      setCountry,
+      setTheme,
+      trackEvent,
+      trackScreen,
+      showForm,
+      dismissForm,
+      addToResponse,
+      resetUser,
+      on,
+      off,
+      submitForm,
+      emitEvent,
+      refineText,
+    ]
+  );
 
   return (
     <EncatchContext.Provider value={contextValue}>
       {navigationType === 'expo-router' && useSegments && (
-        <ExpoRouterTracker skippedRoutes={skippedRoutes} />
+        <ExpoRouterTracker skippedRoutes={skippedRoutes} ready={isInitialized} />
       )}
       {navigationType === 'react-navigation' && useNavigationState && (
-        <ReactNavigationTracker skippedRoutes={skippedRoutes} />
+        <ReactNavigationTracker skippedRoutes={skippedRoutes} ready={isInitialized} />
       )}
       {children}
     </EncatchContext.Provider>

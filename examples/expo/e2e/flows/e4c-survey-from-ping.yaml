@@ -1,0 +1,13 @@
+# E4c: the ping reply carries a survey (set after login; pings every 30 s).
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- runScript:
+    file: common/mock.js
+    env:
+      MOCK_PATH: scenario
+      MOCK_BODY: '{"triggers":{"ping":{"formId":"0190f1d2-0000-7000-8000-00000000f001","onPageDelay":0}}}'
+- runFlow: { file: common/wait-survey.yaml, env: { SURVEY_TIMEOUT: 45000 } }
+# Stay open through the next ping: it must not show the survey again.
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 35 } }

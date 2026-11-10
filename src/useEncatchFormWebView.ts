@@ -17,7 +17,7 @@
 import React, { useRef, useState, useCallback, useMemo } from 'react';
 import { Linking } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
-import { Encatch } from './encatch';
+import { Encatch, _internalEmitter } from './encatch';
 import {
   parsePendingCompletionCta,
   schedulePendingCompletionCta,
@@ -103,6 +103,12 @@ export function useEncatchFormWebView(
   const formAnsweredTracked = useRef<Set<string>>(new Set());
   const pendingDismissResolverRef = useRef<(() => void) | null>(null);
   const pendingCompletionCtaRef = useRef<unknown>(null);
+  /**
+   * The webViewUrl of the survey whose final submit (or form:complete) has
+   * arrived. Closing that survey (for example from its thank-you page) is not a
+   * dismissal. Keyed by URL, which changes with every new survey shown.
+   */
+  const submittedUrlRef = useRef<string | null>(null);
 
   // Keep stable refs to callbacks so inner useCallbacks don't re-bind on every render
   const onCloseRef = useRef(onClose);
@@ -132,6 +138,8 @@ export function useEncatchFormWebView(
       presentation
     );
   }, [formPayload, webViewInstanceKey, presentation]);
+  const webViewUrlRef = useRef(webViewUrl);
+  webViewUrlRef.current = webViewUrl;
 
   // ============================================================================
   // Inject message into WebView (Native → WebView)
@@ -220,6 +228,12 @@ export function useEncatchFormWebView(
       }
 
       const { type, data } = parsed;
+      // The survey page can send an empty formId and no feedbackConfigurationId, so
+      // fall back to the survey this view opened (the id showForm used, and the
+      // form's id from the show-form reply).
+      const shownConfigId = formPayloadRef.current?.formConfig?.feedbackConfigurationId || undefined;
+      const eventFormId = parsed.formId || formPayloadRef.current?.formId || shownConfigId || '';
+      const configId = (data?.feedbackConfigurationId as string | undefined) || shownConfigId;
 
       switch (type) {
         case 'form:ready': {
@@ -269,8 +283,9 @@ export function useEncatchFormWebView(
               visitedQuestionIds: data.visitedQuestionIds as string[] | undefined,
             },
           };
+          if (!submitReq.formDetails.isPartialSubmit) submittedUrlRef.current = webViewUrlRef.current;
           Encatch.submitForm(submitReq).catch(() => {});
-          Encatch.emitEvent('form:submit', { formId: parsed.formId, data });
+          Encatch.emitEvent('form:submit', { formId: eventFormId, data });
           break;
         }
 
@@ -278,10 +293,11 @@ export function useEncatchFormWebView(
           // Resolve the form identifier — the bridge page formId var may be empty when the
           // form URL does not carry a formId param; fall back to feedbackConfigurationId.
           const completeFormId =
-            parsed.formId || (data?.feedbackConfigurationId as string | undefined) || '';
+            parsed.formId || (data?.feedbackConfigurationId as string | undefined) || shownConfigId || '';
           console.log(`[${logTag}] exit_form: form:complete received — formId: "${completeFormId}" | payload pendingCompletionCta:`, JSON.stringify(data?.pendingCompletionCta ?? null), '| cached ref:', JSON.stringify(pendingCompletionCtaRef.current ?? null));
+          submittedUrlRef.current = webViewUrlRef.current;
           Encatch.emitEvent('form:complete', { formId: completeFormId, data });
-          Encatch._trackFormEvent('form:complete', data?.feedbackConfigurationId as string | undefined).catch(() => {});
+          Encatch._trackFormEvent('form:complete', configId).catch(() => {});
           formAnsweredTracked.current.delete(completeFormId);
           const pending = parsePendingCompletionCta(data?.pendingCompletionCta ?? pendingCompletionCtaRef.current);
           pendingCompletionCtaRef.current = null;
@@ -299,36 +315,50 @@ export function useEncatchFormWebView(
         }
 
         case 'form:close': {
-          Encatch.emitEvent('form:close', { formId: parsed.formId, data });
-          formAnsweredTracked.current.delete((data?.feedbackConfigurationId as string | undefined) ?? parsed.formId ?? '');
+          // The page's form:close carries no feedbackConfigurationId and its formId can be
+          // empty, so use the id from the show-form reply this survey was opened with.
+          const closedFormId =
+            formPayloadRef.current?.formConfig?.feedbackConfigurationId ||
+            (data?.feedbackConfigurationId as string | undefined) ||
+            parsed.formId ||
+            undefined;
+          Encatch.emitEvent('form:close', { formId: eventFormId, data });
+          formAnsweredTracked.current.delete(closedFormId ?? '');
+          // Closed before the final submit: a dismissal. Closed on the thank-you
+          // page, after the final submit, is not. ("Remind me later" and
+          // call-to-action buttons arrive as their own messages, not form:close.)
+          if (submittedUrlRef.current !== webViewUrlRef.current) {
+            _internalEmitter.emit('closedBeforeSubmit', { formConfigurationId: closedFormId });
+          }
+          submittedUrlRef.current = null;
           onCloseRef.current();
           break;
         }
 
         case 'form:started': {
-          Encatch.emitEvent('form:started', { formId: parsed.formId, data });
-          Encatch._trackFormEvent('form:started', data?.feedbackConfigurationId as string | undefined).catch(() => {});
+          Encatch.emitEvent('form:started', { formId: eventFormId, data });
+          Encatch._trackFormEvent('form:started', configId).catch(() => {});
           break;
         }
 
         case 'form:answered': {
-          Encatch.emitEvent('form:answered', { formId: parsed.formId, data });
-          const answeredKey = (data?.feedbackConfigurationId as string | undefined) ?? parsed.formId ?? '';
+          Encatch.emitEvent('form:answered', { formId: eventFormId, data });
+          const answeredKey = configId ?? eventFormId;
           if (answeredKey && !formAnsweredTracked.current.has(answeredKey)) {
             formAnsweredTracked.current.add(answeredKey);
-            Encatch._trackFormEvent('form:answered', data?.feedbackConfigurationId as string | undefined).catch(() => {});
+            Encatch._trackFormEvent('form:answered', configId).catch(() => {});
           }
           break;
         }
 
         case 'form:section:change': {
-          Encatch.emitEvent('form:section:change', { formId: parsed.formId, data });
+          Encatch.emitEvent('form:section:change', { formId: eventFormId, data });
           break;
         }
 
         case 'form:show': {
-          Encatch.emitEvent('form:show', { formId: parsed.formId, data });
-          Encatch._trackFormEvent('form:show', data?.feedbackConfigurationId as string | undefined).catch(() => {});
+          Encatch.emitEvent('form:show', { formId: eventFormId, data });
+          Encatch._trackFormEvent('form:show', configId).catch(() => {});
           break;
         }
 
@@ -356,7 +386,7 @@ export function useEncatchFormWebView(
 
         case 'form:error': {
           console.warn(`[${logTag}] form:error received:`, data);
-          Encatch.emitEvent('form:error', { formId: parsed.formId, data });
+          Encatch.emitEvent('form:error', { formId: eventFormId, data });
           break;
         }
 
@@ -430,7 +460,10 @@ export function useEncatchFormWebView(
         }
 
         case 'form:remindmelater': {
-          Encatch.emitEvent('form:remindmelater', { formId: parsed.formId ?? '', data });
+          Encatch.emitEvent('form:remindmelater', { formId: eventFormId, data });
+          // Survey event for the server (identified users only, like the others; the
+          // server's handling of it comes later). Not a dismissal.
+          Encatch._trackFormEvent('form:remindmelater', configId).catch(() => {});
           onCloseRef.current();
           break;
         }
@@ -442,7 +475,7 @@ export function useEncatchFormWebView(
           if (ctaAction === 'app_navigate') {
             // Emit first so host Encatch.on() subscribers can navigate, then close
             // the WebView the same way form:close does for redirect/dismiss CTAs.
-            Encatch.emitEvent('form:ctaTriggered', { formId: parsed.formId, data });
+            Encatch.emitEvent('form:ctaTriggered', { formId: eventFormId, data });
             onCloseRef.current();
           } else if (ctaAction === 'redirect_internal' && ctaUrl) {
             // Close the modal before opening Custom Tabs / SFSafariViewController so the
@@ -451,7 +484,7 @@ export function useEncatchFormWebView(
             const openDelayMs = getRedirectOpenDelayMs(ctaAction);
             setTimeout(() => {
               openRedirectInternalUrl(ctaUrl, logTag);
-              Encatch.emitEvent('form:ctaTriggered', { formId: parsed.formId, data });
+              Encatch.emitEvent('form:ctaTriggered', { formId: eventFormId, data });
             }, openDelayMs);
           } else if (ctaAction === 'redirect_external' && ctaUrl) {
             onCloseRef.current({ immediate: true });
@@ -459,7 +492,7 @@ export function useEncatchFormWebView(
               Linking.openURL(ctaUrl).catch((err) => {
                 console.warn(`[${logTag}] redirect_external: failed to open URL:`, ctaUrl, err);
               });
-              Encatch.emitEvent('form:ctaTriggered', { formId: parsed.formId, data });
+              Encatch.emitEvent('form:ctaTriggered', { formId: eventFormId, data });
             }, REDIRECT_AFTER_IMMEDIATE_CLOSE_DELAY_MS);
           }
           break;

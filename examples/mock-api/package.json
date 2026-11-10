@@ -1,0 +1,22 @@
+{
+  "name": "@encatch/mock-api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local mock of the Encatch gateway and core API, for SDK tests and the example apps. Never forwards to a real server.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "hono": "^4.13.17"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3"
+  }
+}

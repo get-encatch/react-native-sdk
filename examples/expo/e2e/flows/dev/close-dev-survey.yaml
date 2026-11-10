@@ -1,0 +1,7 @@
+# Closes the open survey with its X and waits for it to go.
+appId: com.encatch.expotester
+---
+- tapOn: "Close"
+- extendedWaitUntil:
+    notVisible: "Close"
+    timeout: 10000

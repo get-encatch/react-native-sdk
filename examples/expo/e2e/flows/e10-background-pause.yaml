@@ -1,0 +1,18 @@
+# E10: background the app during a 429 pause, then come back.
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- tapOn: { id: tab-burst }
+- tapOn: { id: burst-event-different }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- pressKey: Home
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 10 } }
+- launchApp:
+    stopApp: false
+- runScript:
+    file: common/mock.js
+    env:
+      MOCK_PATH: hooks
+      MOCK_BODY: '{"marker":"foreground"}'
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 65 } }
