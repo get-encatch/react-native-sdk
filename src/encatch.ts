@@ -849,16 +849,15 @@ class EncatchSDK {
 
   /**
    * The user closed a survey with its X before the final submit (reported by the
-   * form views). For an identified user this is a dismissal: the form:dismissed
-   * survey event, the dismiss-form request and the app's form:dismissed event.
-   * Visitors get nothing, not even the local event. The view closes itself.
+   * form views). This is a dismissal: the dismiss-form request and the app's
+   * form:dismissed event, for a visitor too (as the web SDK does), so the server
+   * stops offering the survey; the form:dismissed survey event only for an
+   * identified user, as the server rejects survey events from visitors. The view
+   * closes itself.
    */
   private async _onClosedBeforeSubmit(formConfigurationId?: string): Promise<void> {
     if (!this._initialized) return;
-    if (!(this._userName && this._userId)) {
-      this._logger.debug('survey closed before submit: not a recorded dismissal for a visitor');
-      return;
-    }
+    // the survey event skips itself for a visitor (and says so), as in dismissForm()
     this._trackFormEvent('form:dismissed', formConfigurationId).catch(() => {});
     await this._sendDismiss(formConfigurationId);
     this.emitEvent('form:dismissed', { formId: formConfigurationId ?? '' });
