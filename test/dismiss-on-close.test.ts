@@ -8,7 +8,9 @@
  * - Closed on the thank-you page (after the final submit or `form:complete`),
  *   "remind me later" and call-to-action buttons → not a dismissal. "Remind me later"
  *   sends its own form:remindmelater survey event for an identified user.
- * - Visitors → nothing at all, not even the app's local event.
+ * - Visitors → the `dismiss-form` request and the app's `form:dismissed` event, but no
+ *   survey event (the server rejects survey events from visitors) — as the web SDK
+ *   does (1.4.5; 1.4.4 sent nothing, so the server kept offering the survey).
  *
  * Renders the real form views and feeds them the survey page's messages through
  * the (stub) WebView's onMessage prop.
@@ -236,17 +238,34 @@ describe('closing a survey with its X', () => {
     await r.finish();
   });
 
-  it('for a visitor sends nothing and emits no form:dismissed event', async () => {
+  for (const view of ['modal', 'inline'] as const) {
+    it(`${view}: for a visitor sends dismiss-form and emits form:dismissed, without the survey event`, async () => {
+      const server = installMock({ scenario: { latencyMs: 0 } });
+      const r = await setup(server, { view });
+      await r.show();
+
+      await r.page('form:close');
+
+      expect(r.dismissRequests()).toHaveLength(1);
+      expect(r.dismissRequests()[0].body.formConfigurationId).toBe(DEFAULT_FORM_ID);
+      expect(r.dismissRequests()[0].headers['x-user-name']).toBeUndefined();
+      expect(r.dismissedEvents()).toHaveLength(0);
+      expect(r.appEventPayloads.filter((e) => e.type === 'form:dismissed')).toEqual([{ type: 'form:dismissed', formId: DEFAULT_FORM_ID }]);
+      expect(server.requests.filter((x) => x.status === 403)).toHaveLength(0);
+      await r.finish();
+    });
+  }
+
+  it('for a visitor, closing on the thank-you page is still not a dismissal', async () => {
     const server = installMock({ scenario: { latencyMs: 0 } });
     const r = await setup(server, { view: 'modal' });
     await r.show();
+    await r.page('form:submit', { isPartialSubmit: false, response: {} });
 
     await r.page('form:close');
 
-    expect(r.dismissedEvents()).toHaveLength(0);
     expect(r.dismissRequests()).toHaveLength(0);
     expect(r.appEvents).not.toContain('form:dismissed');
-    expect(server.requests.filter((x) => x.status === 403)).toHaveLength(0);
     await r.finish();
   });
 
