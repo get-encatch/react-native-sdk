@@ -95,12 +95,13 @@ function EncatchAppInner({
 
   return (
     <EncatchProvider
-      key={`${setupValues.apiKey}-${setupValues.environment}-${setupValues.autoStartVisitorSession}`}
+      key={`${setupValues.apiKey}-${setupValues.environment}-${setupValues.autoStartVisitorSession}-${setupValues.persistUserAcrossRestarts}`}
       apiKey={setupValues.apiKey}
       config={{
         apiBaseUrl: endpoints.apiBaseUrl,
         webHost: endpoints.webHost,
         debugMode: true,
+        persistUserAcrossRestarts: setupValues.persistUserAcrossRestarts,
         // Mock and DEV only: report the SDK's debug hooks to the local collector for the E2E flows.
         ...(reportsToLocalCollector(setupValues.environment) ? mockDebugHooks : {}),
         onBeforeShowForm: async (payload) => {

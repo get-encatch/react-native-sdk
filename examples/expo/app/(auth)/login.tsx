@@ -93,22 +93,26 @@ function SetupFields({
   interceptorFormId,
   environment,
   autoStartVisitorSession,
+  persistUserAcrossRestarts,
   onApiKeyChange,
   onFormIdChange,
   onInterceptorFormIdChange,
   onEnvironmentChange,
   onAutoStartVisitorSessionChange,
+  onPersistUserAcrossRestartsChange,
 }: {
   apiKey: string;
   formId: string;
   interceptorFormId: string;
   environment: EncatchEnvironment;
   autoStartVisitorSession: boolean;
+  persistUserAcrossRestarts: boolean;
   onApiKeyChange: (v: string) => void;
   onFormIdChange: (v: string) => void;
   onInterceptorFormIdChange: (v: string) => void;
   onEnvironmentChange: (env: EncatchEnvironment) => void;
   onAutoStartVisitorSessionChange: (v: boolean) => void;
+  onPersistUserAcrossRestartsChange: (v: boolean) => void;
 }) {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
@@ -165,6 +169,16 @@ function SetupFields({
           onValueChange={onAutoStartVisitorSessionChange}
         />
       </View>
+      <View style={styles.switchRow}>
+        <Text style={[styles.label, styles.switchLabel, { color: colors.text }]}>
+          Keep the user after an app restart
+        </Text>
+        <Switch
+          testID="setup-persist-user"
+          value={persistUserAcrossRestarts}
+          onValueChange={onPersistUserAcrossRestartsChange}
+        />
+      </View>
     </View>
   );
 }
@@ -217,6 +231,7 @@ function LoginSetupOnly() {
   const [interceptorFormId, setInterceptorFormId] = useState(setupValues.interceptorFormId);
   const [environment, setEnvironment] = useState(setupValues.environment);
   const [autoStartVisitorSession, setAutoStartVisitorSession] = useState(setupValues.autoStartVisitorSession);
+  const [persistUserAcrossRestarts, setPersistUserAcrossRestarts] = useState(setupValues.persistUserAcrossRestarts);
   const [saving, setSaving] = useState(false);
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
@@ -227,6 +242,7 @@ function LoginSetupOnly() {
     setInterceptorFormId(setupValues.interceptorFormId);
     setEnvironment(setupValues.environment);
     setAutoStartVisitorSession(setupValues.autoStartVisitorSession);
+    setPersistUserAcrossRestarts(setupValues.persistUserAcrossRestarts);
   }, [setupValues]);
 
   const canSave = apiKey.trim().length > 0 && formId.trim().length > 0;
@@ -240,6 +256,7 @@ function LoginSetupOnly() {
       interceptorFormId: interceptorFormId.trim(),
       environment,
       autoStartVisitorSession,
+      persistUserAcrossRestarts,
     });
     setSaving(false);
   };
@@ -260,6 +277,8 @@ function LoginSetupOnly() {
           environment={environment}
           autoStartVisitorSession={autoStartVisitorSession}
           onAutoStartVisitorSessionChange={setAutoStartVisitorSession}
+          persistUserAcrossRestarts={persistUserAcrossRestarts}
+          onPersistUserAcrossRestartsChange={setPersistUserAcrossRestarts}
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
@@ -301,6 +320,7 @@ function LoginWithIdentify() {
   const [interceptorFormId, setInterceptorFormId] = useState(setupValues.interceptorFormId);
   const [environment, setEnvironment] = useState(setupValues.environment);
   const [autoStartVisitorSession, setAutoStartVisitorSession] = useState(setupValues.autoStartVisitorSession);
+  const [persistUserAcrossRestarts, setPersistUserAcrossRestarts] = useState(setupValues.persistUserAcrossRestarts);
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
   const [showNewUser, setShowNewUser] = useState(false);
   const [newUsername, setNewUsername] = useState('');
@@ -316,6 +336,7 @@ function LoginWithIdentify() {
     setInterceptorFormId(setupValues.interceptorFormId);
     setEnvironment(setupValues.environment);
     setAutoStartVisitorSession(setupValues.autoStartVisitorSession);
+    setPersistUserAcrossRestarts(setupValues.persistUserAcrossRestarts);
   }, [setupValues]);
 
   const trimmedApiKey = apiKey.trim();
@@ -326,7 +347,8 @@ function LoginWithIdentify() {
     setupValues.formId !== trimmedFormId ||
     setupValues.interceptorFormId !== trimmedInterceptorFormId ||
     setupValues.environment !== environment ||
-    setupValues.autoStartVisitorSession !== autoStartVisitorSession;
+    setupValues.autoStartVisitorSession !== autoStartVisitorSession ||
+    setupValues.persistUserAcrossRestarts !== persistUserAcrossRestarts;
 
   const canApplySetup = trimmedApiKey.length > 0 && trimmedFormId.length > 0 && setupDirty;
 
@@ -346,6 +368,7 @@ function LoginWithIdentify() {
       interceptorFormId: trimmedInterceptorFormId,
       environment,
       autoStartVisitorSession,
+      persistUserAcrossRestarts,
     });
     setApplyingSetup(false);
   }, [
@@ -355,6 +378,7 @@ function LoginWithIdentify() {
     trimmedInterceptorFormId,
     environment,
     autoStartVisitorSession,
+    persistUserAcrossRestarts,
     updateSetup,
   ]);
 
@@ -415,6 +439,8 @@ function LoginWithIdentify() {
           environment={environment}
           autoStartVisitorSession={autoStartVisitorSession}
           onAutoStartVisitorSessionChange={setAutoStartVisitorSession}
+          persistUserAcrossRestarts={persistUserAcrossRestarts}
+          onPersistUserAcrossRestartsChange={setPersistUserAcrossRestarts}
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
