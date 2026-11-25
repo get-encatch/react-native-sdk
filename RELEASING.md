@@ -92,8 +92,11 @@ From the next release on, follow the normal commands below.
 Run from the repository root. release-it checks the branch, runs the type check, bumps the version, updates `CHANGELOG.md`, builds, commits, tags, pushes, publishes to npm and opens the GitHub Release page.
 
 ```bash
-# Pre-release from main (e.g. 1.5.0-beta.0, then 1.5.0-beta.1, ...)
-pnpm release --preRelease=beta
+# First pre-release of a new minor from main (e.g. 1.4.4 -> 1.5.0-beta.0)
+pnpm release minor --preRelease=beta --no-plugins.@release-it/conventional-changelog.infile
+
+# Next pre-release (1.5.0-beta.0 -> 1.5.0-beta.1)
+pnpm release --preRelease --no-plugins.@release-it/conventional-changelog.infile
 
 # New stable minor (e.g. 1.5.0): bring main into release/1.x with a pull
 # request (main -> release/1.x, merge commit), then:
@@ -110,7 +113,24 @@ After a stable release, open a pull request from `release/1.x` into `main` (merg
 
 Add `--dry-run` to any command to see what would happen without changing anything.
 
-When npm asks for two-factor authentication, it prints a link: open it and approve in the browser. release-it then opens a prefilled GitHub Release page in your browser; publish it there.
+When npm asks for two-factor authentication, it prints a link: open it and approve in the browser within 5 minutes (the link expires). release-it then opens a prefilled GitHub Release page in your browser; publish it there.
+
+### Pre-releases don't write `CHANGELOG.md`
+
+The `--no-plugins.@release-it/conventional-changelog.infile` flag above leaves `CHANGELOG.md` alone for betas. The stable release gets one hand-written section for the whole minor (for example `## 1.5.0`), added through a pull request before running `pnpm release`.
+
+### `main` only accepts pull requests
+
+`main` is protected: changes must be made through a pull request, so release-it's push of its release commit (`chore(release): vX.Y.Z-beta.N`) to `main` is rejected. Everything else still goes through, because release-it carries on after the failed push: the tag is pushed, the package is published to npm and the GitHub release is created. It ends with "WARNING The package might have been released, but git push failed".
+
+Then land the release commit on `main` with a pull request:
+
+```bash
+git push origin HEAD:refs/heads/chore/release-1.5.0-beta.0
+gh pr create --base main --head chore/release-1.5.0-beta.0 --title "chore(release): v1.5.0-beta.0" --body "Version bump for the published 1.5.0-beta.0."
+```
+
+Merge it with a **merge commit, not squash**, so the tag (which points at that commit) stays in `main`'s history. After the merge, `git pull` on `main` fast-forwards your local branch. `release/1.x` has no such rule: stable releases push normally.
 
 ## After releasing
 
