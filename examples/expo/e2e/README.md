@@ -25,12 +25,13 @@ The runner stops the app on both platforms, resets the mock and sets each flow's
 | E3 | Screen with a survey, opened repeatedly before it shows | One show-form; no 404 |
 | E4a–c | Survey from the identify, track-event and ping replies | Each shows once; no ping while it is open |
 | E5 | Answer and submit a survey | One submit-form 200; survey events sent for the identified user; no dismissal |
-| E6 | Visitor sees a survey and closes it with the X | No survey events, no dismiss-form; no 403 |
+| E6 | Visitor sees a survey and closes it with the X | No survey events; one dismiss-form (1.5.0); no 403 |
 | E7 | `planned-prod` and `per-endpoint-5` bursts that hit 429 | No retries of 429'd calls; nothing sent while paused; submit still works; traffic resumes |
 | E8 | Secure identify, valid or wrong signature, key with and without a session time | 200 and signed later requests, or 401 and no identified requests |
 | E9 | Logout, then log in as another user | New identity on every later request; no mixed headers |
 | E10 | Background and return during a 429 pause | Nothing sent while paused; no event sent twice; no burst on return |
 | E11 | Debug hooks | `onRequest` / `onResponse` once per request; collapsed calls reported as skipped; no key in reports |
+| E12 | `autoStartVisitorSession={false}` (1.5.0): visitor, sign in, log out | No ping or automatic screen for the visitor; the app's own trackScreen still sent; sign-in sends a screen and starts pings; quiet again after logout |
 
 ## What the example adds for these flows (Mock environment only)
 

@@ -11,12 +11,15 @@ const STORAGE_KEY_API_KEY = 'encatch_tester_api_key';
 const STORAGE_KEY_FORM_ID = 'encatch_tester_form_id';
 const STORAGE_KEY_INTERCEPTOR_FORM_ID = 'encatch_tester_interceptor_form_id';
 const STORAGE_KEY_ENVIRONMENT = 'encatch_tester_environment';
+const STORAGE_KEY_AUTO_START_VISITOR = 'encatch_tester_auto_start_visitor_session';
 
 export type TesterSetupValues = {
   apiKey: string;
   formId: string;
   interceptorFormId: string;
   environment: EncatchEnvironment;
+  /** EncatchProvider's autoStartVisitorSession (default true). */
+  autoStartVisitorSession: boolean;
 };
 
 export const emptyTesterSetup = (): TesterSetupValues => ({
@@ -24,6 +27,7 @@ export const emptyTesterSetup = (): TesterSetupValues => ({
   formId: '',
   interceptorFormId: '',
   environment: 'uat',
+  autoStartVisitorSession: true,
 });
 
 type TesterConfigContextValue = {
@@ -83,12 +87,13 @@ export function useTesterConfig() {
 }
 
 export async function loadStoredTesterSetup(): Promise<TesterSetupValues> {
-  const [storedApiKey, storedFormId, storedInterceptorFormId, storedEnvironment] =
+  const [storedApiKey, storedFormId, storedInterceptorFormId, storedEnvironment, storedAutoStartVisitor] =
     await Promise.all([
       AsyncStorage.getItem(STORAGE_KEY_API_KEY),
       AsyncStorage.getItem(STORAGE_KEY_FORM_ID),
       AsyncStorage.getItem(STORAGE_KEY_INTERCEPTOR_FORM_ID),
       AsyncStorage.getItem(STORAGE_KEY_ENVIRONMENT),
+      AsyncStorage.getItem(STORAGE_KEY_AUTO_START_VISITOR),
     ]);
 
   return {
@@ -96,6 +101,7 @@ export async function loadStoredTesterSetup(): Promise<TesterSetupValues> {
     formId: storedFormId?.trim() ?? '',
     interceptorFormId: storedInterceptorFormId?.trim() ?? '',
     environment: resolveEnvironment(storedEnvironment),
+    autoStartVisitorSession: storedAutoStartVisitor !== 'false',
   };
 }
 
@@ -105,6 +111,7 @@ export async function persistTesterSetup(values: TesterSetupValues): Promise<voi
     AsyncStorage.setItem(STORAGE_KEY_FORM_ID, values.formId.trim()),
     AsyncStorage.setItem(STORAGE_KEY_INTERCEPTOR_FORM_ID, values.interceptorFormId.trim()),
     AsyncStorage.setItem(STORAGE_KEY_ENVIRONMENT, values.environment),
+    AsyncStorage.setItem(STORAGE_KEY_AUTO_START_VISITOR, String(values.autoStartVisitorSession)),
   ]);
 }
 
@@ -114,6 +121,7 @@ export async function clearStoredTesterSetup(): Promise<void> {
     AsyncStorage.removeItem(STORAGE_KEY_FORM_ID),
     AsyncStorage.removeItem(STORAGE_KEY_INTERCEPTOR_FORM_ID),
     AsyncStorage.removeItem(STORAGE_KEY_ENVIRONMENT),
+    AsyncStorage.removeItem(STORAGE_KEY_AUTO_START_VISITOR),
   ]);
 }
 

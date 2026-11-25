@@ -9,6 +9,7 @@ import {
   Platform,
   ActivityIndicator,
   ScrollView,
+  Switch,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useEncatch } from '@encatch/react-native-sdk';
@@ -91,19 +92,23 @@ function SetupFields({
   formId,
   interceptorFormId,
   environment,
+  autoStartVisitorSession,
   onApiKeyChange,
   onFormIdChange,
   onInterceptorFormIdChange,
   onEnvironmentChange,
+  onAutoStartVisitorSessionChange,
 }: {
   apiKey: string;
   formId: string;
   interceptorFormId: string;
   environment: EncatchEnvironment;
+  autoStartVisitorSession: boolean;
   onApiKeyChange: (v: string) => void;
   onFormIdChange: (v: string) => void;
   onInterceptorFormIdChange: (v: string) => void;
   onEnvironmentChange: (env: EncatchEnvironment) => void;
+  onAutoStartVisitorSessionChange: (v: boolean) => void;
 }) {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
@@ -150,6 +155,16 @@ function SetupFields({
         autoCapitalize="none"
         autoCorrect={false}
       />
+      <View style={styles.switchRow}>
+        <Text style={[styles.label, styles.switchLabel, { color: colors.text }]}>
+          Auto-start visitor session (ping and screen tracking before sign-in)
+        </Text>
+        <Switch
+          testID="setup-visitor-autostart"
+          value={autoStartVisitorSession}
+          onValueChange={onAutoStartVisitorSessionChange}
+        />
+      </View>
     </View>
   );
 }
@@ -201,6 +216,7 @@ function LoginSetupOnly() {
   const [formId, setFormId] = useState(setupValues.formId);
   const [interceptorFormId, setInterceptorFormId] = useState(setupValues.interceptorFormId);
   const [environment, setEnvironment] = useState(setupValues.environment);
+  const [autoStartVisitorSession, setAutoStartVisitorSession] = useState(setupValues.autoStartVisitorSession);
   const [saving, setSaving] = useState(false);
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
@@ -210,6 +226,7 @@ function LoginSetupOnly() {
     setFormId(setupValues.formId);
     setInterceptorFormId(setupValues.interceptorFormId);
     setEnvironment(setupValues.environment);
+    setAutoStartVisitorSession(setupValues.autoStartVisitorSession);
   }, [setupValues]);
 
   const canSave = apiKey.trim().length > 0 && formId.trim().length > 0;
@@ -222,6 +239,7 @@ function LoginSetupOnly() {
       formId: formId.trim(),
       interceptorFormId: interceptorFormId.trim(),
       environment,
+      autoStartVisitorSession,
     });
     setSaving(false);
   };
@@ -240,6 +258,8 @@ function LoginSetupOnly() {
           formId={formId}
           interceptorFormId={interceptorFormId}
           environment={environment}
+          autoStartVisitorSession={autoStartVisitorSession}
+          onAutoStartVisitorSessionChange={setAutoStartVisitorSession}
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
@@ -280,6 +300,7 @@ function LoginWithIdentify() {
   const [formId, setFormId] = useState(setupValues.formId);
   const [interceptorFormId, setInterceptorFormId] = useState(setupValues.interceptorFormId);
   const [environment, setEnvironment] = useState(setupValues.environment);
+  const [autoStartVisitorSession, setAutoStartVisitorSession] = useState(setupValues.autoStartVisitorSession);
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
   const [showNewUser, setShowNewUser] = useState(false);
   const [newUsername, setNewUsername] = useState('');
@@ -294,6 +315,7 @@ function LoginWithIdentify() {
     setFormId(setupValues.formId);
     setInterceptorFormId(setupValues.interceptorFormId);
     setEnvironment(setupValues.environment);
+    setAutoStartVisitorSession(setupValues.autoStartVisitorSession);
   }, [setupValues]);
 
   const trimmedApiKey = apiKey.trim();
@@ -303,7 +325,8 @@ function LoginWithIdentify() {
     setupValues.apiKey !== trimmedApiKey ||
     setupValues.formId !== trimmedFormId ||
     setupValues.interceptorFormId !== trimmedInterceptorFormId ||
-    setupValues.environment !== environment;
+    setupValues.environment !== environment ||
+    setupValues.autoStartVisitorSession !== autoStartVisitorSession;
 
   const canApplySetup = trimmedApiKey.length > 0 && trimmedFormId.length > 0 && setupDirty;
 
@@ -322,6 +345,7 @@ function LoginWithIdentify() {
       formId: trimmedFormId,
       interceptorFormId: trimmedInterceptorFormId,
       environment,
+      autoStartVisitorSession,
     });
     setApplyingSetup(false);
   }, [
@@ -330,6 +354,7 @@ function LoginWithIdentify() {
     trimmedFormId,
     trimmedInterceptorFormId,
     environment,
+    autoStartVisitorSession,
     updateSetup,
   ]);
 
@@ -388,6 +413,8 @@ function LoginWithIdentify() {
           formId={formId}
           interceptorFormId={interceptorFormId}
           environment={environment}
+          autoStartVisitorSession={autoStartVisitorSession}
+          onAutoStartVisitorSessionChange={setAutoStartVisitorSession}
           onApiKeyChange={setApiKey}
           onFormIdChange={setFormId}
           onInterceptorFormIdChange={setInterceptorFormId}
@@ -669,6 +696,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     marginBottom: 6,
+  },
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 4,
+  },
+  switchLabel: {
+    flex: 1,
+    marginBottom: 0,
   },
   input: {
     height: 44,

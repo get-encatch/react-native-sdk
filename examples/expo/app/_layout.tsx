@@ -95,7 +95,7 @@ function EncatchAppInner({
 
   return (
     <EncatchProvider
-      key={`${setupValues.apiKey}-${setupValues.environment}`}
+      key={`${setupValues.apiKey}-${setupValues.environment}-${setupValues.autoStartVisitorSession}`}
       apiKey={setupValues.apiKey}
       config={{
         apiBaseUrl: endpoints.apiBaseUrl,
@@ -116,7 +116,8 @@ function EncatchAppInner({
           return true;
         },
       }}
-      navigationType="expo-router">
+      navigationType="expo-router"
+      autoStartVisitorSession={setupValues.autoStartVisitorSession}>
       <EncatchWebView />
       <SdkEventReporter enabled={reportsToLocalCollector(setupValues.environment)} />
       <CtaNavigationHandler />
