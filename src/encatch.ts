@@ -18,6 +18,9 @@ import {
   getOrCreateDeviceId,
   getOrCreateSessionId,
   clearSession,
+  setPersistUserAcrossRestarts,
+  clearStoredUserData,
+  clearMemoryUserData,
   getUserName,
   setUserName,
   clearUserName,
@@ -295,6 +298,12 @@ class EncatchSDK {
     this._onResponse = config?.onResponse;
 
     this._logger.debug('Initializing SDK...');
+
+    // persistUserAcrossRestarts false: the user lives in memory for this run only,
+    // and user data an earlier run saved on the device is deleted.
+    const persistUser = config?.persistUserAcrossRestarts !== false;
+    setPersistUserAcrossRestarts(persistUser);
+    if (!persistUser) await clearStoredUserData();
 
     // Load persisted identity, app package, and app version
     const [storedName, deviceId, sessionId, prefs, appPackageId, appVersion] = await Promise.all([
@@ -1293,7 +1302,9 @@ class EncatchSDK {
     this._markFormClosed();
     this._cancelPendingAutoShow();
 
-    // Wipe every @encatch/ key from AsyncStorage in a single batch
+    // Wipe every @encatch/ key from AsyncStorage in a single batch (and the
+    // in-memory user data used with persistUserAcrossRestarts false)
+    clearMemoryUserData();
     try {
       const allKeys = await AsyncStorage.getAllKeys();
       const encatchKeys = allKeys.filter((k) => k.startsWith('@encatch/'));

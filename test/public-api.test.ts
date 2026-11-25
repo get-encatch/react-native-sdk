@@ -23,6 +23,8 @@ const ALLOWED_NEW_MEMBERS = [
   '_setAutoStartVisitorSession(enabled: boolean): void;',
   // EncatchProvider prop
   'autoStartVisitorSession?: boolean;',
+  // EncatchConfig option
+  'persistUserAcrossRestarts?: boolean;',
 ];
 
 function buildDeclarations(): string {
