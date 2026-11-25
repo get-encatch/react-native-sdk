@@ -189,6 +189,13 @@ class EncatchSDK {
    */
   private _signatureExpired = false;
   private _heldSubmits: SubmitFormRequest[] = [];
+  /**
+   * A confirmed identity: restored at init, or set when an identify reply is
+   * applied; cleared by resetUser / clearAll. What isIdentified() and the hook's
+   * isIdentified report. During a user switch it keeps describing the previous
+   * user until the new user's identify succeeds.
+   */
+  private _identityConfirmed = false;
 
   // Preferences
   private _locale: string | null = null;
@@ -223,6 +230,14 @@ class EncatchSDK {
   // Session control state
   private _isSessionPaused = false;
   private _isSessionStopped = false;
+  /** EncatchProvider's autoStartVisitorSession prop (default true). */
+  private _autoStartVisitorSession = true;
+  /**
+   * autoStartVisitorSession is false and the user is a visitor whose session
+   * hasn't been started: no ping, no automatic screens. Set at launch and on
+   * resetUser; cleared by any startSession() (a successful identify included).
+   */
+  private _visitorQuiet = false;
 
   // App version (can be set by consumer)
   private _appVersion = '1.0.0';
@@ -315,6 +330,7 @@ class EncatchSDK {
     } else {
       this._feedbackTransactions = await getFeedbackTransactions('anonymous');
     }
+    this._identityConfirmed = !!(this._userName && this._userId);
 
     this._initialized = true;
     // Survey X-close before submit, reported by the form views (once, even if init runs again).
@@ -465,14 +481,18 @@ class EncatchSDK {
       this._handleResponseMeta(res);
 
       // Notify listeners that the user is now fully identified (userName + userId)
+      this._identityConfirmed = !!(this._userName && this._userId);
       _internalEmitter.emit('userIdentified', {
         userName: this._userName,
         userId: this._userId,
       });
 
       // Start session after successful identify — ping interval runs but no
-      // immediate ping or trackScreen fires (matches web SDK behaviour exactly)
-      await this.startSession({ skipImmediatePing: true, skipImmediateTrackScreen: true });
+      // immediate ping or trackScreen fires (matches web SDK behaviour exactly).
+      // Exception: a visitor whose session wasn't running (autoStartVisitorSession
+      // false) also sends the current screen, which was skipped while quiet.
+      const wasVisitorQuiet = this._visitorQuiet;
+      await this.startSession({ skipImmediatePing: true, skipImmediateTrackScreen: !wasVisitorQuiet });
 
       // Apply pingAgainIn from identify response after session is started
       if (typeof res.pingAgainIn === 'number' && res.pingAgainIn > 0) {
@@ -873,8 +893,22 @@ class EncatchSDK {
       this._logger.debug('session not started at launch: stopSession() is in effect until startSession() or identifyUser()');
       return;
     }
+    if (!this._autoStartVisitorSession && !(this._userName && this._userId)) {
+      this._visitorQuiet = true;
+      this._logger.debug('visitor session not started at launch: autoStartVisitorSession is false');
+      return;
+    }
     this.startSession().catch(() => {});
   };
+
+  /**
+   * EncatchProvider's autoStartVisitorSession prop. Read at launch and on
+   * resetUser(), so a change while the app runs applies from the next sign-out
+   * or launch. @internal
+   */
+  _setAutoStartVisitorSession(enabled: boolean): void {
+    this._autoStartVisitorSession = enabled;
+  }
 
   /**
    * A screen from EncatchProvider's navigation tracker. While stopped it isn't sent,
@@ -885,6 +919,11 @@ class EncatchSDK {
     if (this._isSessionStopped) {
       if (this._initialized && !this._isFullScreen) this._currentScreen = p.screenName;
       this._logger.debug(`automatic screen "${p.screenName}" not sent: stopSession() is in effect`);
+      return;
+    }
+    if (this._visitorQuiet) {
+      if (this._initialized && !this._isFullScreen) this._currentScreen = p.screenName;
+      this._logger.debug(`automatic screen "${p.screenName}" not sent: visitor session not started (autoStartVisitorSession is false)`);
       return;
     }
     this.trackScreen(p.screenName).catch(() => {});
@@ -1279,6 +1318,8 @@ class EncatchSDK {
     this._isSessionPaused = false;
     this._isSessionStopped = false;
     this._isPingActive = false;
+    this._identityConfirmed = false;
+    this._visitorQuiet = false;
 
     // Notify any listeners that the user identity has been fully cleared
     _internalEmitter.emit('userIdentified', { userName: null, userId: null });
@@ -1294,6 +1335,7 @@ class EncatchSDK {
     // Clear stopped/paused state — startSession is the explicit re-enable after stopSession()
     this._isSessionStopped = false;
     this._isSessionPaused = false;
+    this._visitorQuiet = false;
     clearSessionStopped().catch(() => {});
 
     // Skip session tracking entirely in fullscreen mode (matches web SDK)
@@ -1435,6 +1477,10 @@ class EncatchSDK {
   }
 
   async resetUser(): Promise<void> {
+    // With autoStartVisitorSession false, go quiet now: apps navigate to their
+    // sign-in screen straight after calling this, before the reset has finished,
+    // and that automatic screen must not go out as a visitor.
+    if (!this._autoStartVisitorSession) this._visitorQuiet = true;
     return this._runIdentityOp(() => this._resetNow());
   }
 
@@ -1471,6 +1517,10 @@ class EncatchSDK {
     await clearSessionStopped();
 
     this._stopPingInterval();
+    this._identityConfirmed = false;
+    // Sign-out with autoStartVisitorSession false: the app goes quiet again (no
+    // automatic screens; the ping is stopped above in every case).
+    this._visitorQuiet = !this._autoStartVisitorSession;
 
     // Notify listeners that the user identity has been cleared
     _internalEmitter.emit('userIdentified', { userName: null, userId: null });
@@ -1531,6 +1581,12 @@ class EncatchSDK {
   }
 
   private async _doPing(): Promise<void> {
+    // A ping already scheduled when the app went quiet (resetUser with
+    // autoStartVisitorSession false) must not go out as a visitor.
+    if (this._visitorQuiet) {
+      this._reportSkipped('ping', 'visitor');
+      return;
+    }
     if (isPaused('tracking')) {
       this._reportSkipped('ping', 'rate-limited');
       return;
@@ -1851,6 +1907,18 @@ class EncatchSDK {
 
   get userId(): string | null {
     return this._userId;
+  }
+
+  /**
+   * True when the SDK has a confirmed identity: the user was restored from the
+   * device at init, or their identifyUser() succeeded. False before init, for
+   * visitors, while a new user's first identify is pending or after it failed,
+   * and after resetUser() / clearAll(). During a switch to another user it stays
+   * true for the previous user until the new user's identify succeeds. Same
+   * answer as useEncatch().isIdentified.
+   */
+  isIdentified(): boolean {
+    return this._initialized && this._identityConfirmed;
   }
 
   get debugMode(): boolean {

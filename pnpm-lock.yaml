@@ -48,6 +48,9 @@ importers:
       sdk-1.4.3:
         specifier: npm:@encatch/react-native-sdk@1.4.3
         version: '@encatch/react-native-sdk@1.4.3(26c66617e6e8c61444527d033fdbdf13)'
+      sdk-1.4.4:
+        specifier: npm:@encatch/react-native-sdk@1.4.4
+        version: '@encatch/react-native-sdk@1.4.4(26c66617e6e8c61444527d033fdbdf13)'
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(jiti@2.7.0)(postcss@8.5.29)(supports-color@8.1.1)(tsx@4.23.15)(typescript@5.9.3)(yaml@2.9.1)
@@ -965,6 +968,44 @@ packages:
 
   '@encatch/react-native-sdk@1.4.3':
     resolution: {integrity: sha512-y9ng5hnYTWJVSpZa5girdRhklwJVRQHZ1MFEEWdXXNDRsink6gvbfGGf5n/GwJI21f4zQTvhyiZmj9/A56727Q==}
+    peerDependencies:
+      '@react-native-async-storage/async-storage': '>=2.0.0'
+      '@react-navigation/native': '>=7.0.0'
+      expo-application: '>=6.0.0'
+      expo-blur: '>=14.0.0'
+      expo-device: '>=7.0.0'
+      expo-localization: '>=16.0.0'
+      expo-router: '>=4.0.0'
+      expo-web-browser: '>=14.0.0'
+      react: '>=18.0.0'
+      react-native: '>=0.73.0'
+      react-native-device-info: '>=10.0.0'
+      react-native-localize: '>=3.0.0'
+      react-native-logs: '>=5.0.0'
+      react-native-safe-area-context: '>=5.0.0'
+      react-native-webview: '>=13.12.0'
+    peerDependenciesMeta:
+      expo-application:
+        optional: true
+      expo-blur:
+        optional: true
+      expo-device:
+        optional: true
+      expo-localization:
+        optional: true
+      expo-router:
+        optional: true
+      expo-web-browser:
+        optional: true
+      react-native-device-info:
+        optional: true
+      react-native-localize:
+        optional: true
+      react-native-logs:
+        optional: true
+
+  '@encatch/react-native-sdk@1.4.4':
+    resolution: {integrity: sha512-XhgPDg5jdfI28JxH4h2BekB2jLupZzHZGVkQa/+3SSit6JjEeJY4hC3HLxq4sp4L9t0HMFwSviel18uOmK7F5Q==}
     peerDependencies:
       '@react-native-async-storage/async-storage': '>=2.0.0'
       '@react-navigation/native': '>=7.0.0'
@@ -7266,6 +7307,24 @@ snapshots:
   '@conventional-changelog/template@1.4.0': {}
 
   '@encatch/react-native-sdk@1.4.3(26c66617e6e8c61444527d033fdbdf13)':
+    dependencies:
+      '@react-native-async-storage/async-storage': 2.2.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))
+      '@react-navigation/native': 7.5.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
+      react: 19.2.4
+      react-native: 0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1)
+      react-native-safe-area-context: 5.7.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
+      react-native-webview: 13.16.1(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
+      uuidv7: 1.2.1
+    optionalDependencies:
+      expo-application: 55.0.19(expo@55.0.31)
+      expo-blur: 55.0.18(expo@55.0.31)(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
+      expo-device: 55.0.21(expo@55.0.31)
+      expo-localization: 55.0.19(expo@55.0.31)(react@19.2.4)
+      expo-router: 55.0.18(e26557436fe0c7fad7e1d328459414d4)
+      expo-web-browser: 55.0.20(expo@55.0.31)(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))
+      react-native-logs: 5.6.0
+
+  '@encatch/react-native-sdk@1.4.4(26c66617e6e8c61444527d033fdbdf13)':
     dependencies:
       '@react-native-async-storage/async-storage': 2.2.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))
       '@react-navigation/native': 7.5.0(react-native@0.84.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.83.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.4)(supports-color@8.1.1))(react@19.2.4)
