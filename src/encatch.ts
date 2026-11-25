@@ -238,6 +238,13 @@ class EncatchSDK {
    * resetUser; cleared by any startSession() (a successful identify included).
    */
   private _visitorQuiet = false;
+  /**
+   * A session was asked for in this run: startSession() was called (directly or
+   * by a successful identify) or EncatchProvider's launch start ran (even when a
+   * saved stopSession() held it back). resetUser() keeps the ping running only
+   * then, so it never starts a session that wasn't meant to run.
+   */
+  private _sessionRequested = false;
 
   // App version (can be set by consumer)
   private _appVersion = '1.0.0';
@@ -889,6 +896,7 @@ class EncatchSDK {
 
   /** EncatchProvider starts the session at launch, unless a stopSession() is in effect. */
   private readonly _startSessionOnLaunchListener = () => {
+    this._sessionRequested = true;
     if (this._isSessionStopped) {
       this._logger.debug('session not started at launch: stopSession() is in effect until startSession() or identifyUser()');
       return;
@@ -1320,6 +1328,7 @@ class EncatchSDK {
     this._isPingActive = false;
     this._identityConfirmed = false;
     this._visitorQuiet = false;
+    this._sessionRequested = false;
 
     // Notify any listeners that the user identity has been fully cleared
     _internalEmitter.emit('userIdentified', { userName: null, userId: null });
@@ -1336,6 +1345,7 @@ class EncatchSDK {
     this._isSessionStopped = false;
     this._isSessionPaused = false;
     this._visitorQuiet = false;
+    this._sessionRequested = true;
     clearSessionStopped().catch(() => {});
 
     // Skip session tracking entirely in fullscreen mode (matches web SDK)
@@ -1516,11 +1526,18 @@ class EncatchSDK {
     this._isSessionStopped = false;
     await clearSessionStopped();
 
-    this._stopPingInterval();
     this._identityConfirmed = false;
     // Sign-out with autoStartVisitorSession false: the app goes quiet again (no
-    // automatic screens; the ping is stopped above in every case).
+    // ping, no automatic screens). Otherwise the session carries on as a visitor:
+    // the ping keeps running like automatic screens do (as in the web SDK), on the
+    // regular interval with no extra ping now; a session that never ran (or
+    // full-screen mode) isn't started.
     this._visitorQuiet = !this._autoStartVisitorSession;
+    if (!this._visitorQuiet && this._sessionRequested && !this._isFullScreen) {
+      this._startPingInterval();
+    } else {
+      this._stopPingInterval();
+    }
 
     // Notify listeners that the user identity has been cleared
     _internalEmitter.emit('userIdentified', { userName: null, userId: null });

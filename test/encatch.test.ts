@@ -1743,3 +1743,106 @@ describe('guards', () => {
     expect(server.count('ping')).toBeGreaterThanOrEqual(2);
   });
 });
+
+// ============================================================================
+// 1.5.0: with autoStartVisitorSession true (the default), resetUser() keeps the
+// session running as a visitor: the ping goes on, like automatic screens (and
+// like the web SDK). It doesn't start a session that never ran.
+// ============================================================================
+
+describe('resetUser keeps the ping running as a visitor (default)', () => {
+  const pingsAfter = (server: InstalledMock, t: number) => server.of('ping').filter((r) => r.at >= t);
+
+  it('the ping carries on after a reset, on the regular interval, sent as a visitor', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(100);
+    expect(pingsAfter(server, resetAt)).toHaveLength(0); // no extra ping at the moment of the reset
+
+    await settle(31_000);
+    const pings = pingsAfter(server, resetAt);
+    expect(pings.length).toBeGreaterThanOrEqual(1);
+    for (const p of pings) expect(p.headers['X-User-Name']).toBeUndefined();
+  });
+
+  it('after stopSession(): the reset clears the stop and the ping runs', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    await sdk.Encatch.stopSession();
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('after pauseSession(): the reset clears the pause and the ping runs', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.pauseSession();
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('launched with a saved stop, then reset: the ping runs (as automatic screens do)', async () => {
+    const server = installMock();
+    await sdk.storage.setItem('@encatch/session_stopped', 'true');
+    await initSdk(sdk.Encatch);
+    sdk.emitter.emit('startSessionOnLaunch', {}); // EncatchProvider's launch start, skipped while stopped
+    await settle(100);
+    expect(server.count('ping')).toBe(0);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a session that never ran is not started by a reset', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    sdk.Encatch.trackScreen('/home').catch(() => {});
+    await settle(500);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBe(0);
+  });
+
+  it('full-screen mode: a reset starts no ping', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, { isFullScreen: true });
+    sdk.Encatch.startSession().catch(() => {}); // skipped in full-screen mode
+    await settle(500);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBe(0);
+  });
+
+  it('guard: with autoStartVisitorSession false, the reset stops the ping (the app goes quiet)', async () => {
+    const server = installMock();
+    sdk.Encatch._setAutoStartVisitorSession(false);
+    await initSdk(sdk.Encatch);
+    await identified(server);
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt)).toHaveLength(0);
+  });
+});
