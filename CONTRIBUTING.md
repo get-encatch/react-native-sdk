@@ -79,7 +79,7 @@ Pull requests are squash-merged, so the pull request title must follow the same 
 Long-lived branches:
 
 - `main`: all development. Open pull requests against `main`.
-- `release/x.y`: stable branches, one per minor version. Fixes are made on `main` first and then cherry-picked to the release branches that need them.
+- `release/1.x`: the stable branch for every 1.x release (patches and minors). Fixes are made on `main` first and then cherry-picked to `release/1.x`; a new minor reaches it by merging `main` into it. A future 2.x line gets its own `release/2.x`.
 
 Work branches are short-lived, branched from `main`, and named `<type>/<short-description>` using the same types as commit messages:
 

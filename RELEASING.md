@@ -7,18 +7,23 @@ Releases are made **locally** by a maintainer with publish rights on the `@encat
 | Branch | Releases | npm dist-tag |
 |---|---|---|
 | `main` | Pre-releases: `x.y.z-beta.N`, then `x.y.z-rc.N` | `beta` (or `rc`) |
-| `release/x.y` | Stable `x.y.z` and patches `x.y.(z+1)` | `latest` |
+| `release/1.x` | Every stable `1.y.z`: patches and new minors | `latest` |
 
 - Versions follow [SemVer](https://semver.org).
 - Every release is an annotated git tag `vX.Y.Z` with a matching GitHub Release.
-- Fixes land on `main` first and are cherry-picked to `release/*` branches.
+- There is one stable branch per major version (`release/1.x`, later `release/2.x`), not one per minor. Only the newest minor gets patches; customers upgrade within 1.x.
+- Fixes land on `main` first and are cherry-picked to `release/1.x`. A new minor reaches `release/1.x` by merging `main` into it.
+- If an older minor ever needs a patch, branch from its tag (for example `git switch -c release/1.4 v1.4.4`) and release from there.
+- The branch was called `release/1.4` until 1.4.4; GitHub redirects the old name.
 
 ## One-time setup
 
 - npm: `npm login` with an account that has publish rights on `@encatch` and 2FA enabled.
 - GitHub: push access to this repository.
 
-## First release from this repository (once)
+## First release from this repository (done for 1.4.3)
+
+Kept for the record. The branch it creates, `release/1.4`, is now `release/1.x`.
 
 The first release from this repository is the stable `1.4.3` (npm `latest`). `1.4.3-beta.0` was published before the SDK moved here, so the repository has no version tag yet, and the import commit's changes (including an iOS fix that is not in `1.4.3-beta.0`) are not Conventional Commits that release-it can turn into a changelog. So the notes for `1.4.3` are written by hand, once:
 
@@ -73,7 +78,7 @@ From the next release on, follow the normal commands below.
 
 ## Checklist before releasing
 
-- [ ] On the right branch (`main` for pre-releases, `release/x.y` for stable), working tree clean, up to date with GitHub.
+- [ ] On the right branch (`main` for pre-releases, `release/1.x` for stable), working tree clean, up to date with GitHub.
 - [ ] `pnpm install` and `pnpm typecheck` pass.
 - [ ] Test matrix passes with the SDK built from this commit:
   - [ ] Android 13, 14 and 15: open a form with a short answer and a long answer; the dialog sits just above the keyboard, its title stays below the status bar, and it drops back when the keyboard closes.
@@ -87,22 +92,45 @@ From the next release on, follow the normal commands below.
 Run from the repository root. release-it checks the branch, runs the type check, bumps the version, updates `CHANGELOG.md`, builds, commits, tags, pushes, publishes to npm and opens the GitHub Release page.
 
 ```bash
-# Pre-release from main (e.g. 1.5.0-beta.0, then 1.5.0-beta.1, ...)
-pnpm release --preRelease=beta
+# First pre-release of a new minor from main (e.g. 1.4.4 -> 1.5.0-beta.0)
+pnpm release minor --preRelease=beta --no-plugins.@release-it/conventional-changelog.infile
 
-# Stable release from a release branch
-git switch -c release/1.5 main     # first stable release of 1.5 only
-pnpm release
+# Next pre-release (1.5.0-beta.0 -> 1.5.0-beta.1)
+pnpm release --preRelease --no-plugins.@release-it/conventional-changelog.infile
 
-# Patch on an existing release branch
-git switch release/1.5
-git cherry-pick <commit-from-main>
+# New stable minor (e.g. 1.5.0): bring main into release/1.x with a pull
+# request (main -> release/1.x, merge commit), then:
+git switch release/1.x && git pull
+pnpm release minor
+
+# Patch (e.g. 1.5.1): cherry-pick the fix from main through a pull request
+# into release/1.x, then:
+git switch release/1.x && git pull
 pnpm release patch
 ```
 
+After a stable release, open a pull request from `release/1.x` into `main` (merge commit, not squash) so the version bump, `CHANGELOG.md` and tag reach `main`.
+
 Add `--dry-run` to any command to see what would happen without changing anything.
 
-When npm asks for two-factor authentication, it prints a link: open it and approve in the browser. release-it then opens a prefilled GitHub Release page in your browser; publish it there.
+When npm asks for two-factor authentication, it prints a link: open it and approve in the browser within 5 minutes (the link expires). release-it then opens a prefilled GitHub Release page in your browser; publish it there.
+
+### Pre-releases don't write `CHANGELOG.md`
+
+The `--no-plugins.@release-it/conventional-changelog.infile` flag above leaves `CHANGELOG.md` alone for betas. The stable release gets one hand-written section for the whole minor (for example `## 1.5.0`), added through a pull request before running `pnpm release`.
+
+### `main` only accepts pull requests
+
+`main` is protected: changes must be made through a pull request, so release-it's push of its release commit (`chore(release): vX.Y.Z-beta.N`) to `main` is rejected. Everything else still goes through, because release-it carries on after the failed push: the tag is pushed, the package is published to npm and the GitHub release is created. It ends with "WARNING The package might have been released, but git push failed".
+
+Then land the release commit on `main` with a pull request:
+
+```bash
+git push origin HEAD:refs/heads/chore/release-1.5.0-beta.0
+gh pr create --base main --head chore/release-1.5.0-beta.0 --title "chore(release): v1.5.0-beta.0" --body "Version bump for the published 1.5.0-beta.0."
+```
+
+Merge it with a **merge commit, not squash**, so the tag (which points at that commit) stays in `main`'s history. After the merge, `git pull` on `main` fast-forwards your local branch. `release/1.x` has no such rule: stable releases push normally.
 
 ## After releasing
 
@@ -110,7 +138,7 @@ When npm asks for two-factor authentication, it prints a link: open it and appro
 npm view @encatch/react-native-sdk dist-tags
 ```
 
-Check that `latest` and `beta` point to the expected versions. If a stable release was made on a release branch, merge or cherry-pick the version bump and `CHANGELOG.md` entry back to `main` if needed.
+Check that `latest` and `beta` point to the expected versions. After a stable release, point `beta` at it too (`npm dist-tag add @encatch/react-native-sdk@<version> beta`), so `@beta` installs don't stay on an older pre-release.
 
 ## Notes
 
