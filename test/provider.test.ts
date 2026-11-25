@@ -684,3 +684,84 @@ describe('Encatch.isIdentified()', () => {
     await r.unmount();
   });
 });
+
+// ============================================================================
+// 1.5.0: after clearAll() (consent withdrawal), automatic tracking (ping and
+// automatic screens) stays off, even after the required init(), until the app
+// calls startSession() or an identify succeeds. Both autoStartVisitorSession
+// settings.
+// ============================================================================
+
+describe('clearAll(): automatic tracking stays off until startSession() or identify', () => {
+  const CONFIG_AGAIN = { apiBaseUrl: 'http://mock.local', appPackageId: 'com.example.test' };
+  const screens = (server: ReturnType<typeof installMock>) =>
+    server.of('track-screen').map((x) => x.body.$deviceInfo.$urlOrScreenName);
+  const navigate = async (r: Awaited<ReturnType<typeof renderProvider>>, p: string) => {
+    router.pathname = p;
+    router.segments = ['(tabs)', p.slice(1)];
+    await r.rerender();
+  };
+  const pingActive = (r: Awaited<ReturnType<typeof renderProvider>>) => (r.Encatch as any)._isPingActive as boolean;
+
+  /** Identify, clearAll(), init() again: what every app does after a consent withdrawal. */
+  async function clearedAndReinitialised(props: Record<string, unknown>) {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props });
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+    await r.run(() => r.Encatch.clearAll(), 200);
+    await r.run(() => r.Encatch.init(DEFAULT_API_KEY, CONFIG_AGAIN), 200);
+    return { server, r, screensBefore: server.of('track-screen').length };
+  }
+
+  for (const [label, props] of [
+    ['autoStartVisitorSession false', { autoStartVisitorSession: false }],
+    ['default (true)', {}],
+  ] as const) {
+    it(`${label}: after clearAll() and init(), no ping and no automatic screens`, async () => {
+      const { server, r, screensBefore } = await clearedAndReinitialised(props);
+
+      await navigate(r, '/settings');
+      await r.run(() => {}, 200);
+
+      expect(server.of('track-screen')).toHaveLength(screensBefore);
+      expect(pingActive(r)).toBe(false);
+      await r.unmount();
+    });
+  }
+
+  it('startSession() turns it back on: ping and the current screen go out, later navigation is tracked', async () => {
+    const { server, r, screensBefore } = await clearedAndReinitialised({});
+    await navigate(r, '/settings');
+
+    await r.run(() => r.Encatch.startSession(), 200);
+
+    expect(pingActive(r)).toBe(true);
+    expect(screens(server).slice(screensBefore)).toEqual(['/settings']);
+    await navigate(r, '/profile');
+    expect(screens(server).slice(screensBefore)).toEqual(['/settings', '/profile']);
+    await r.unmount();
+  });
+
+  it('an identify turns it back on: the session starts and the current screen is sent once, as the user', async () => {
+    const { server, r, screensBefore } = await clearedAndReinitialised({});
+    await navigate(r, '/settings');
+
+    await r.run(() => r.Encatch.identifyUser('bob').catch(() => {}), 200);
+
+    expect(pingActive(r)).toBe(true);
+    const after = server.of('track-screen').slice(screensBefore);
+    expect(after.map((x) => x.body.$deviceInfo.$urlOrScreenName)).toEqual(['/settings']);
+    expect(after[0].headers['X-User-Name']).toBe('bob');
+    await r.unmount();
+  });
+
+  it("the app's own trackScreen still goes out after clearAll() and init()", async () => {
+    const { server, r, screensBefore } = await clearedAndReinitialised({});
+
+    await r.run(() => r.latest().trackScreen('/checkout'));
+
+    expect(screens(server).slice(screensBefore)).toEqual(['/checkout']);
+    expect(pingActive(r)).toBe(false);
+    await r.unmount();
+  });
+});

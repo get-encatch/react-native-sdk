@@ -236,9 +236,12 @@ class EncatchSDK {
   /** EncatchProvider's autoStartVisitorSession prop (default true). */
   private _autoStartVisitorSession = true;
   /**
-   * autoStartVisitorSession is false and the user is a visitor whose session
-   * hasn't been started: no ping, no automatic screens. Set at launch and on
-   * resetUser; cleared by any startSession() (a successful identify included).
+   * Automatic tracking is held: no ping, no automatic screens (the app's own
+   * calls still go out). Set at launch and on resetUser when
+   * autoStartVisitorSession is false and the user is a visitor, and by clearAll()
+   * whatever the setting (consent withdrawal: nothing automatic until the app
+   * asks again, even after init()). Cleared by any startSession() (a successful
+   * identify included).
    */
   private _visitorQuiet = false;
   /**
@@ -1289,6 +1292,11 @@ class EncatchSDK {
    * After calling clearAll() the SDK must be re-initialized (init()) before any
    * further use.  Equivalent to uninstalling and reinstalling the host app from an
    * SDK data perspective.
+   *
+   * Automatic tracking (the background ping and EncatchProvider's screen tracking)
+   * stays off after that init() too, until the app calls startSession() or an
+   * identifyUser() succeeds. The app's own calls (trackScreen, trackEvent,
+   * showForm) work as soon as init() has run.
    */
   async clearAll(): Promise<void> {
     // Stop background activity
@@ -1338,7 +1346,9 @@ class EncatchSDK {
     this._isSessionStopped = false;
     this._isPingActive = false;
     this._identityConfirmed = false;
-    this._visitorQuiet = false;
+    // Consent withdrawal: automatic tracking stays off after the next init() too,
+    // until startSession() or a successful identify.
+    this._visitorQuiet = true;
     this._sessionRequested = false;
 
     // Notify any listeners that the user identity has been fully cleared
