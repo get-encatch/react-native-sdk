@@ -1743,3 +1743,227 @@ describe('guards', () => {
     expect(server.count('ping')).toBeGreaterThanOrEqual(2);
   });
 });
+
+// ============================================================================
+// 1.5.0: with autoStartVisitorSession true (the default), resetUser() keeps the
+// session running as a visitor: the ping goes on, like automatic screens (and
+// like the web SDK). It doesn't start a session that never ran.
+// ============================================================================
+
+describe('resetUser keeps the ping running as a visitor (default)', () => {
+  const pingsAfter = (server: InstalledMock, t: number) => server.of('ping').filter((r) => r.at >= t);
+
+  it('the ping carries on after a reset, on the regular interval, sent as a visitor', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(100);
+    expect(pingsAfter(server, resetAt)).toHaveLength(0); // no extra ping at the moment of the reset
+
+    await settle(31_000);
+    const pings = pingsAfter(server, resetAt);
+    expect(pings.length).toBeGreaterThanOrEqual(1);
+    for (const p of pings) expect(p.headers['X-User-Name']).toBeUndefined();
+  });
+
+  it('after stopSession(): the reset clears the stop and the ping runs', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    await sdk.Encatch.stopSession();
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('after pauseSession(): the reset clears the pause and the ping runs', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.pauseSession();
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('launched with a saved stop, then reset: the ping runs (as automatic screens do)', async () => {
+    const server = installMock();
+    await sdk.storage.setItem('@encatch/session_stopped', 'true');
+    await initSdk(sdk.Encatch);
+    sdk.emitter.emit('startSessionOnLaunch', {}); // EncatchProvider's launch start, skipped while stopped
+    await settle(100);
+    expect(server.count('ping')).toBe(0);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a session that never ran is not started by a reset', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    sdk.Encatch.trackScreen('/home').catch(() => {});
+    await settle(500);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBe(0);
+  });
+
+  it('full-screen mode: a reset starts no ping', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, { isFullScreen: true });
+    sdk.Encatch.startSession().catch(() => {}); // skipped in full-screen mode
+    await settle(500);
+
+    await sdk.Encatch.resetUser();
+    await settle(31_000);
+
+    expect(server.count('ping')).toBe(0);
+  });
+
+  it('guard: with autoStartVisitorSession false, the reset stops the ping (the app goes quiet)', async () => {
+    const server = installMock();
+    sdk.Encatch._setAutoStartVisitorSession(false);
+    await initSdk(sdk.Encatch);
+    await identified(server);
+
+    await sdk.Encatch.resetUser();
+    const resetAt = Date.now();
+    await settle(31_000);
+
+    expect(pingsAfter(server, resetAt)).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// 1.5.0: persistUserAcrossRestarts (EncatchConfig, default true). With false the
+// user lives in memory for the current app run only: nothing about them is saved
+// on the device, and user data an earlier run saved is deleted at init.
+// ============================================================================
+
+describe('persistUserAcrossRestarts: false', () => {
+  const OFF = { persistUserAcrossRestarts: false };
+  const USER_KEY = /^@encatch\/(user_name|user_id_|user_signature_|ft_)/;
+  const userKeys = async () => (await sdk.storage.getAllKeys()).filter((k: string) => USER_KEY.test(k));
+
+  /** Simulates an app restart: a fresh SDK (new process), the device storage kept. */
+  async function restartApp() {
+    const saved = (await import('./mocks/async-storage')).__dumpStorage();
+    sdk.Encatch.stop();
+    sdk = await loadSdk();
+    (await import('./mocks/async-storage')).__loadStorage(saved);
+  }
+
+  it('nothing about the user is saved on the device, but requests still go out as the user', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, OFF, DEFAULT_SECURE_API_KEY);
+
+    sdk.Encatch.identifyUser('alice', undefined, { secure: { signature: hmacHex('alice', DEFAULT_SECRET) } }).catch(() => {});
+    await settle(1_000);
+    sdk.Encatch.trackEvent('opened').catch(() => {});
+    await settle(1_000);
+
+    expect(await userKeys()).toEqual([]);
+    const event = server.of('track-event').find((r) => r.body.eventName === 'opened')!;
+    expect(event.headers['X-User-Name']).toBe('alice');
+    expect(event.headers['X-User-Id']).toBe(server.userId('alice'));
+    expect(event.headers['X-User-Signature']).toBeTruthy();
+    expect(sdk.Encatch.isIdentified()).toBe(true);
+  });
+
+  it('after a restart the user is a visitor until the app identifies again', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, OFF);
+    await identified(server);
+
+    await restartApp();
+    const server2 = installMock();
+    await initSdk(sdk.Encatch, OFF);
+    sdk.Encatch.trackEvent('after_restart').catch(() => {});
+    await settle(1_000);
+
+    expect(sdk.Encatch.isIdentified()).toBe(false);
+    expect(sdk.Encatch.userName).toBeNull();
+    const event = server2.of('track-event')[0];
+    expect(event.headers['X-User-Name']).toBeUndefined();
+    expect(event.headers['X-User-Id']).toBeUndefined();
+  });
+
+  it('user data saved by an earlier run with the default (true) is deleted at init', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    expect((await userKeys()).length).toBeGreaterThan(0);
+
+    await restartApp();
+    installMock();
+    await initSdk(sdk.Encatch, OFF);
+
+    expect(await userKeys()).toEqual([]);
+    expect(sdk.Encatch.userName).toBeNull();
+    expect(sdk.Encatch.isIdentified()).toBe(false);
+  });
+
+  it('still saved: the device ID, a saved stopSession() and preferences', async () => {
+    installMock();
+    await initSdk(sdk.Encatch, OFF);
+    sdk.Encatch.setLocale('fr');
+    await sdk.Encatch.stopSession();
+    await settle(100);
+
+    expect(await sdk.storage.getItem('@encatch/device_id')).toBeTruthy();
+    expect(await sdk.storage.getItem('@encatch/session_stopped')).toBe('true');
+    expect(await sdk.storage.getItem('@encatch/preferences')).toContain('fr');
+  });
+
+  it('within one run, switching back to an earlier user reuses their id at once (kept in memory)', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, OFF);
+    await identified(server, 'alice');
+    await identified(server, 'bob');
+
+    sdk.Encatch.identifyUser('alice', { $set: { plan: 'pro' } }).catch(() => {});
+    await settle(0);
+
+    expect(sdk.Encatch.userName).toBe('alice');
+    expect(sdk.Encatch.userId).toBe(server.userId('alice'));
+    expect(await userKeys()).toEqual([]);
+  });
+
+  it('clearAll() also forgets the in-memory user', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, OFF);
+    await identified(server);
+
+    await sdk.Encatch.clearAll();
+    await initSdk(sdk.Encatch, OFF);
+
+    expect(sdk.Encatch.userName).toBeNull();
+    expect(sdk.Encatch.isIdentified()).toBe(false);
+  });
+
+  it('guard: by default (true) the user is restored after a restart', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+
+    await restartApp();
+    installMock();
+    await initSdk(sdk.Encatch);
+
+    expect(sdk.Encatch.userName).toBe('alice');
+    expect(sdk.Encatch.isIdentified()).toBe(true);
+  });
+});

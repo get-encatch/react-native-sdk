@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end flows E1–E11 for the 1.4.4 hotfix, against the local mock API only.
+ * End-to-end flows E1–E13 (1.4.4 hotfix, 1.5.0 additions), against the local mock API only.
  *
  * Maestro drives the example app (release build, Mock environment); this script
  * resets the mock before each flow, sets the flow's scenario, runs the flow, then
@@ -11,7 +11,11 @@
  *   node examples/expo/e2e/run.mjs --platform android --device emulator-5554 --only E1,E5
  *
  * Options: --out <dir> (screenshots and request logs for failures),
- *          --mock <url> (default http://localhost:8787).
+ *          --mock <url> (default http://localhost:8787),
+ *          --parallel (stop only this platform's app; for running Android and iOS at
+ *          once, each against its own mock: build the Android app with
+ *          EXPO_PUBLIC_ENCATCH_MOCK_API_URL=http://10.0.2.2:8788 and start a second
+ *          mock with MOCK_API_PORT=8788).
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -31,6 +35,7 @@ const DEVICE = args.device;
 const MOCK = args.mock ?? 'http://localhost:8787';
 const OUT = args.out ?? path.join(HERE, '.results');
 const ONLY = args.only ? new Set(args.only.split(',').map((s) => s.trim().toUpperCase())) : null;
+const PARALLEL = process.argv.includes('--parallel');
 if (!['ios', 'android'].includes(PLATFORM) || !DEVICE) {
   console.error('Usage: node run.mjs --platform ios|android --device <id> [--only E1,E2] [--out dir]');
   process.exit(2);
@@ -211,7 +216,9 @@ const FLOWS = [
       expect(surveyEvents.length === 0, `${surveyEvents.length} survey event(s) sent for a visitor`);
       expect(status(log, 403).length === 0, `${status(log, 403).length} × 403`);
       expect(log.every((r) => !r.headers['x-user-name']), 'a request carried X-User-Name');
-      expect(by(log, 'dismiss-form').length === 0, 'a visitor X-close sent dismiss-form');
+      // 1.5.0 (#16): a visitor's X before the final submit sends dismiss-form (no survey event).
+      const dismissals = by(log, 'dismiss-form');
+      expect(dismissals.length === 1 && dismissals[0].status === 200, `expected 1 dismiss-form 200 for the visitor X-close, got ${dismissals.map((r) => r.status).join(',') || 'none'}`);
     },
   },
   ...['planned-prod', 'per-endpoint-5'].map((preset) => ({
@@ -332,15 +339,72 @@ const FLOWS = [
       expect(!/mock-api-key|x-api-key|signature/i.test(text), 'a hook report contained the API key or a signature');
     },
   },
+  {
+    id: 'E12',
+    file: 'e12-visitor-session-off.yaml',
+    check(log, { expect }) {
+      const ids = by(log, 'identify-user');
+      expect(ids.length === 1 && ids[0].status === 200, `expected 1 identify-user 200, got ${ids.map((r) => r.status).join(',') || 'none'}`);
+      const visitor = log.filter((r) => r.endpoint !== 'identify-user' && !hasIdentity(r));
+      const visitorPings = by(visitor, 'ping');
+      expect(visitorPings.length === 0, `${visitorPings.length} ping(s) sent for a visitor`);
+      const visitorScreens = by(visitor, 'track-screen').map(screenOf);
+      expect(
+        JSON.stringify(visitorScreens) === JSON.stringify(['/dev-page', '/after-logout']),
+        `visitor track-screens should be only the app's own two calls, got ${JSON.stringify(visitorScreens)}`
+      );
+      const id = ids[0];
+      if (!id) return;
+      const identified = log.filter((r) => hasIdentity(r));
+      const firstScreen = by(identified, 'track-screen')[0];
+      expect(Boolean(firstScreen) && firstScreen.at - doneAt(id) < 3000, 'no identified track-screen within 3 s of sign-in');
+      expect(by(identified, 'ping').length >= 1, 'no ping after sign-in');
+      const marker = by(visitor, 'track-screen').find((r) => screenOf(r) === '/after-logout');
+      if (marker) expect(!identified.some((r) => r.at > marker.at), 'identified requests after logout');
+    },
+  },
+  ...[
+    ['off', 'false', 'login'],
+    ['default', 'true', 'home'],
+  ].map(([label, persist, expectScreen]) => ({
+    id: `E13-${label}`,
+    match: 'E13',
+    file: 'e13-restart.yaml',
+    env: { PERSIST_USER: persist, EXPECT: expectScreen },
+    check(log, { expect }) {
+      // Each app launch has its own session id: split the run before and after the restart.
+      const sessions = [...new Set(log.map((r) => r.headers['x-session-id']).filter(Boolean))];
+      expect(sessions.length >= 2, `expected requests from 2 launches, got ${sessions.length} session id(s)`);
+      const ids = by(log, 'identify-user');
+      expect(ids.length === 1 && ids[0].status === 200, `expected 1 identify-user 200, got ${ids.map((r) => r.status).join(',') || 'none'}`);
+      const user = ids[0]?.body?.userName;
+      const before = log.filter((r) => r.headers['x-session-id'] === sessions[0]);
+      const after = log.filter((r) => r.headers['x-session-id'] === sessions.at(-1));
+      expect(before.some(hasIdentity), 'no identified request before the restart');
+      expect(after.length > 0, 'no requests after the restart');
+      if (persist === 'false') {
+        const identified = after.filter((r) => r.headers['x-user-name'] || r.headers['x-user-id']);
+        expect(identified.length === 0, `${identified.length} request(s) after the restart carried the user (should be a visitor)`);
+      } else {
+        const bad = after.filter((r) => r.headers['x-user-name'] !== user || !r.headers['x-user-id']);
+        expect(bad.length === 0, `${bad.length} request(s) after the restart not sent as ${user}`);
+      }
+    },
+  })),
 ];
 
 // ── Device helpers ───────────────────────────────────────────────────────────
 function stopApps() {
   const quiet = { stdio: 'ignore' };
   // Stop the app on both platforms: a running copy would add traffic to the mock.
-  spawnSync('xcrun', ['simctl', 'terminate', PLATFORM === 'ios' ? DEVICE : 'booted', APP_ID], quiet);
+  // With --parallel the other platform runs its own flows against its own mock.
+  if (PLATFORM === 'ios' || !PARALLEL) {
+    spawnSync('xcrun', ['simctl', 'terminate', PLATFORM === 'ios' ? DEVICE : 'booted', APP_ID], quiet);
+  }
   const adb = path.join(process.env.ANDROID_HOME ?? `${process.env.HOME}/Library/Android/sdk`, 'platform-tools/adb');
-  spawnSync(adb, [...(PLATFORM === 'android' ? ['-s', DEVICE] : []), 'shell', 'am', 'force-stop', APP_ID], quiet);
+  if (PLATFORM === 'android' || !PARALLEL) {
+    spawnSync(adb, [...(PLATFORM === 'android' ? ['-s', DEVICE] : []), 'shell', 'am', 'force-stop', APP_ID], quiet);
+  }
 }
 
 function screenshot(file) {
@@ -365,7 +429,7 @@ for (const flow of FLOWS) {
   if (ONLY && !ONLY.has(flow.id.toUpperCase()) && !ONLY.has((flow.match ?? '').toUpperCase())) continue;
   const user = `e2e_${flow.id.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${stamp}`;
   const user2 = `${user}_b`;
-  const env = { MOCK_URL: MOCK, ENV: 'mock', FORM_ID: FORM_ID, USER: user, USER2: user2, API_KEY: 'mock-api-key', SIGNATURE: 'none', WAIT_HOME: 'true', WAIT_LOGIN: 'true', ...flow.env };
+  const env = { MOCK_URL: MOCK, ENV: 'mock', FORM_ID: FORM_ID, USER: user, USER2: user2, API_KEY: 'mock-api-key', SIGNATURE: 'none', WAIT_HOME: 'true', WAIT_LOGIN: 'true', VISITOR_AUTOSTART: 'true', PERSIST_USER: 'true', EXPECT: 'home', ...flow.env };
 
   stopApps();
   await mock('reset', {});

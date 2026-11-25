@@ -193,35 +193,35 @@ const FLOWS = [
   },
   {
     id: 'V2',
-    title: 'Visitor: page visit trigger, closed with the X (no dismissal for visitors)',
+    title: 'Visitor: page visit trigger, closed with the X (dismiss-form, 1.5.0)',
     file: 'v-visitor.yaml',
     env: { ACTION: 'screen', VALUE: '/dev-page', SUBMIT: 'false' },
     check(v, expect) {
       common(v, expect);
       shownOnly(v, expect, F.pageVisit, 'page visit form');
-      notDismissed(v, expect);
+      dismissed(v, expect, F.pageVisit);
     },
   },
   {
     id: 'V3',
-    title: 'Visitor: tracked event trigger, closed with the X',
+    title: 'Visitor: tracked event trigger, closed with the X (dismiss-form, 1.5.0)',
     file: 'v-visitor.yaml',
     env: { ACTION: 'event', VALUE: 'dev_event', SUBMIT: 'false' },
     check(v, expect) {
       common(v, expect);
       shownOnly(v, expect, F.trackedEvent, 'tracked event form');
-      notDismissed(v, expect);
+      dismissed(v, expect, F.trackedEvent);
     },
   },
   {
     id: 'V4',
-    title: 'Visitor: immediate trigger, closed with the X',
+    title: 'Visitor: immediate trigger, closed with the X (dismiss-form, 1.5.0)',
     file: 'v-visitor.yaml',
     env: { ACTION: 'screen', VALUE: '/dev-immediate', SUBMIT: 'false' },
     check(v, expect) {
       common(v, expect);
       shownOnly(v, expect, F.immediate, 'immediate form');
-      notDismissed(v, expect);
+      dismissed(v, expect, F.immediate);
     },
   },
 ];

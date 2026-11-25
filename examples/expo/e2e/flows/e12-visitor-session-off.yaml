@@ -1,0 +1,43 @@
+# E12: autoStartVisitorSession={false}. A visitor gets no ping and no automatic
+# screens; the app's own trackScreen still goes out; signing in starts the session;
+# logging out makes the app quiet again.
+appId: com.encatch.expotester
+---
+- runFlow: { file: common/setup.yaml, env: { VISITOR_AUTOSTART: 'false' } }
+# Quiet as a visitor.
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 6 } }
+# The app's own trackScreen (explicit) is still sent.
+- scrollUntilVisible:
+    element:
+      id: visitor-track-screen
+    direction: DOWN
+- tapOn:
+    id: visitor-track-screen
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+# Sign in: the session starts. The screen replies ask for the next ping in 30 s.
+- runFlow: common/login.yaml
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 36 } }
+# Log out: quiet again.
+- tapOn: "Logout"
+- extendedWaitUntil:
+    visible:
+      id: setup-apply
+    timeout: 20000
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 14 } }
+# A final explicit trackScreen as the visitor, as a marker.
+- scrollUntilVisible:
+    element:
+      id: visitor-value
+    direction: DOWN
+- tapOn:
+    id: visitor-value
+- eraseText: 30
+- inputText: /after-logout
+- pressKey: Enter
+- scrollUntilVisible:
+    element:
+      id: visitor-track-screen
+    direction: DOWN
+- tapOn:
+    id: visitor-track-screen
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }

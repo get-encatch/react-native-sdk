@@ -136,6 +136,18 @@ export interface EncatchProviderProps {
   navigationType?: 'expo-router' | 'react-navigation' | null;
   /** Screen names that should be skipped for tracking */
   skippedRoutes?: string[];
+  /**
+   * Start the session automatically for visitors (users not identified).
+   * - true: as before, every launch starts the ping and automatic screen tracking.
+   * - false: a visitor gets no ping and no automatic screen tracking. The session
+   *   starts when identifyUser() succeeds (the current screen is then sent once)
+   *   or when the app calls Encatch.startSession(), and stops again on resetUser().
+   *   A user restored from the device at launch starts as usual. The app's own
+   *   trackScreen / trackEvent / showForm calls are always sent.
+   * Read at launch and on resetUser(); a change while the app runs applies from then.
+   * @default true
+   */
+  autoStartVisitorSession?: boolean;
 }
 
 // ============================================================================
@@ -248,11 +260,17 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
   config,
   navigationType = null,
   skippedRoutes = [],
+  autoStartVisitorSession = true,
 }) => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isIdentified, setIsIdentified] = useState(false);
   const [userName, setUserName] = useState<string | null>(null);
   const initCalled = useRef(false);
+
+  // Before the init effect below, so the launch start sees it.
+  useEffect(() => {
+    Encatch._setAutoStartVisitorSession(autoStartVisitorSession);
+  }, [autoStartVisitorSession]);
 
   useEffect(() => {
     if (initCalled.current) return;
@@ -262,7 +280,7 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
       setIsInitialized(true);
       // Option 3: restore identity from storage on cold start — init() has already
       // loaded userName + userId from AsyncStorage, so we can read them synchronously.
-      setIsIdentified(!!Encatch.userName && !!Encatch.userId);
+      setIsIdentified(Encatch.isIdentified());
       setUserName(Encatch.userName);
       // Automatic start at launch: skipped while a saved stopSession() is in effect.
       _internalEmitter.emit('startSessionOnLaunch', {});

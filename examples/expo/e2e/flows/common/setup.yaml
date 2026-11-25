@@ -1,5 +1,7 @@
 # Fresh install → environment → Save. Ends on the login screen.
-# Env: ENV (mock or dev), API_KEY, FORM_ID (used when ENV isn't mock), WAIT_LOGIN.
+# Env: ENV (mock or dev), API_KEY, FORM_ID (used when ENV isn't mock), WAIT_LOGIN,
+# VISITOR_AUTOSTART ('false' turns off EncatchProvider's autoStartVisitorSession),
+# PERSIST_USER ('false' turns off EncatchConfig.persistUserAcrossRestarts).
 appId: com.encatch.expotester
 ---
 - launchApp:
@@ -31,6 +33,30 @@ appId: com.encatch.expotester
       - eraseText: 60
       - inputText: ${FORM_ID}
       - pressKey: Enter
+- runFlow:
+    when:
+      true: ${VISITOR_AUTOSTART == 'false'}
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: setup-visitor-autostart
+          direction: DOWN
+      - tapOn:
+          id: setup-visitor-autostart
+- runFlow:
+    when:
+      true: ${PERSIST_USER == 'false'}
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: setup-persist-user
+          direction: DOWN
+      - tapOn:
+          id: setup-persist-user
+- scrollUntilVisible:
+    element:
+      id: setup-save
+    direction: DOWN
 - tapOn:
     id: setup-save
 # Android asks for camera and microphone on first launch; the flows don't need them.

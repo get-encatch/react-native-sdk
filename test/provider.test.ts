@@ -72,7 +72,7 @@ afterEach(() => {
 /** Renders the provider inside a parent whose re-renders the test controls. */
 async function renderProvider(
   navigationType: 'expo-router' | 'react-navigation' | null,
-  opts: { storedBeforeLaunch?: Record<string, string> } = {}
+  opts: { storedBeforeLaunch?: Record<string, string>; props?: Record<string, unknown> } = {}
 ) {
   const p = await loadProvider();
   if (opts.storedBeforeLaunch) {
@@ -100,7 +100,7 @@ async function renderProvider(
     rerenderParent = () => setTick((t) => t + 1);
     return h(
       p.EncatchProvider,
-      { apiKey: DEFAULT_API_KEY, config: CONFIG, navigationType },
+      { apiKey: DEFAULT_API_KEY, config: CONFIG, navigationType, ...opts.props },
       h(Consumer),
       h(MemoConsumer)
     );
@@ -355,6 +355,332 @@ describe('EncatchProvider: identity transitions', () => {
     expect(functionsOf(r.latest())).toEqual(initial);
     await r.rerender(3);
     for (const [i, fn] of functionsOf(r.latest()).entries()) expect(fn).toBe(initial[i]);
+    await r.unmount();
+  });
+});
+
+// ============================================================================
+// 1.5.0: autoStartVisitorSession (provider prop, default true)
+// ============================================================================
+
+describe('EncatchProvider: autoStartVisitorSession={false}', () => {
+  const OFF = { autoStartVisitorSession: false };
+  const screensOf = (server: ReturnType<typeof installMock>) =>
+    server.of('track-screen').map((x) => x.body.$deviceInfo.$urlOrScreenName);
+  const navigate = async (r: Awaited<ReturnType<typeof renderProvider>>, p: string) => {
+    router.pathname = p;
+    router.segments = ['(tabs)', p.slice(1)];
+    await r.rerender();
+  };
+  const pingActive = (r: Awaited<ReturnType<typeof renderProvider>>) => (r.Encatch as any)._isPingActive as boolean;
+
+  it('visitor at launch: no ping and no automatic screens, even after navigating', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+    await navigate(r, '/settings');
+    await r.run(() => {}, 200);
+
+    expect(server.of('ping')).toHaveLength(0);
+    expect(server.of('track-screen')).toHaveLength(0);
+    expect(pingActive(r)).toBe(false);
+    await r.unmount();
+  });
+
+  it('identified user restored at launch: the session starts as usual, sent as that user', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', {
+      props: OFF,
+      storedBeforeLaunch: { '@encatch/user_name': 'alice', '@encatch/user_id_alice': server.userId('alice') },
+    });
+
+    expect(server.of('ping').length).toBeGreaterThanOrEqual(1);
+    expect(screensOf(server)).toEqual(['/home']);
+    expect(server.of('track-screen')[0].headers['X-User-Name']).toBe('alice');
+    await r.unmount();
+  });
+
+  it('name saved without an id (first identify never succeeded): treated as a visitor, nothing automatic', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF, storedBeforeLaunch: { '@encatch/user_name': 'alice' } });
+    await r.run(() => {}, 200);
+
+    expect(server.of('ping')).toHaveLength(0);
+    expect(server.of('track-screen')).toHaveLength(0);
+    await r.unmount();
+  });
+
+  it('visitor signs in: the session starts and the current screen is sent once, as the user', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+    await navigate(r, '/dashboard'); // reached before the identify reply: skipped, but remembered
+
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+
+    expect(pingActive(r)).toBe(true);
+    expect(screensOf(server)).toEqual(['/dashboard']);
+    expect(server.of('track-screen')[0].headers['X-User-Name']).toBe('alice');
+    await navigate(r, '/profile');
+    expect(screensOf(server)).toEqual(['/dashboard', '/profile']);
+    await r.unmount();
+  });
+
+  it('an identify while the session already runs sends no extra screen', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', {
+      props: OFF,
+      storedBeforeLaunch: { '@encatch/user_name': 'alice', '@encatch/user_id_alice': server.userId('alice') },
+    });
+    expect(screensOf(server)).toEqual(['/home']);
+
+    await r.run(() => r.Encatch.identifyUser('alice', { $set: { plan: 'pro' } }).catch(() => {}), 200);
+
+    expect(screensOf(server)).toEqual(['/home']);
+    await r.unmount();
+  });
+
+  it('sign-out (resetUser) goes quiet again: ping stops and automatic screens stop', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+    expect(pingActive(r)).toBe(true);
+    const screensBefore = server.of('track-screen').length;
+
+    await r.run(() => r.latest().resetUser(), 200);
+    await navigate(r, '/settings');
+    await r.run(() => {}, 200);
+
+    expect(pingActive(r)).toBe(false);
+    expect(server.of('track-screen')).toHaveLength(screensBefore);
+    await r.unmount();
+  });
+
+  it('sign-out followed straight away by navigation: the new screen is not sent', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+    const screensBefore = server.of('track-screen').length;
+    // Device storage isn't instant: resetUser()'s storage clean-up takes a while.
+    const storage = (await import('./mocks/async-storage')).default;
+    const removeItem = storage.removeItem.bind(storage);
+    vi.spyOn(storage, 'removeItem').mockImplementation(async (k: string) => {
+      await wait(50);
+      return removeItem(k);
+    });
+
+    // As the example app does: resetUser() (not awaited), then navigate to the login screen at once.
+    await r.act(async () => {
+      r.latest().resetUser();
+      router.pathname = '/login';
+      router.segments = ['(auth)', 'login'];
+    });
+    await r.rerender();
+    await r.run(() => {}, 600);
+
+    expect(server.of('track-screen')).toHaveLength(screensBefore);
+    await r.unmount();
+  });
+
+  it("the app's own trackScreen and trackEvent still go out for a visitor", async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+
+    await r.run(() => r.latest().trackScreen('/checkout'));
+    await r.run(() => r.latest().trackEvent('opened_checkout'));
+
+    expect(screensOf(server)).toEqual(['/checkout']);
+    expect(server.of('track-event')).toHaveLength(1);
+    expect(server.of('ping')).toHaveLength(0);
+    await r.unmount();
+  });
+
+  it('an explicit Encatch.startSession() starts the visitor session: ping and the current screen go out', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: OFF });
+    await navigate(r, '/settings');
+
+    await r.run(() => r.Encatch.startSession(), 200);
+
+    expect(server.of('ping').length).toBeGreaterThanOrEqual(1);
+    expect(screensOf(server)).toEqual(['/settings']);
+    await navigate(r, '/profile');
+    expect(screensOf(server)).toEqual(['/settings', '/profile']);
+    await r.unmount();
+  });
+
+  it('a saved stopSession() still wins for an identified user', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', {
+      props: OFF,
+      storedBeforeLaunch: {
+        '@encatch/session_stopped': 'true',
+        '@encatch/user_name': 'alice',
+        '@encatch/user_id_alice': server.userId('alice'),
+      },
+    });
+    await r.run(() => {}, 200);
+
+    expect(server.of('ping')).toHaveLength(0);
+    expect(server.of('track-screen')).toHaveLength(0);
+    await r.unmount();
+  });
+});
+
+describe('EncatchProvider: autoStartVisitorSession default (true) is unchanged from 1.4.4', () => {
+  it('guard: visitor at launch: ping and the first screen go out', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router', { props: { autoStartVisitorSession: true } });
+
+    expect(server.of('ping').length).toBeGreaterThanOrEqual(1);
+    expect(server.of('track-screen')).toHaveLength(1);
+    await r.unmount();
+  });
+
+  it('guard: after resetUser, automatic screens keep going out as a visitor', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router');
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+    await r.run(() => r.latest().resetUser(), 200);
+    const before = server.of('track-screen').length;
+
+    router.pathname = '/settings';
+    router.segments = ['(tabs)', 'settings'];
+    await r.rerender();
+    await r.run(() => {}, 100);
+
+    expect(server.of('track-screen')).toHaveLength(before + 1);
+    expect(server.of('track-screen').at(-1)!.headers['X-User-Name']).toBeUndefined();
+    await r.unmount();
+  });
+
+  it('guard: visitor signs in: no extra screen is sent (as in 1.4.4)', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider('expo-router');
+    const before = server.of('track-screen').length;
+
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+
+    expect(server.of('track-screen')).toHaveLength(before);
+    await r.unmount();
+  });
+});
+
+// ============================================================================
+// 1.5.0: Encatch.isIdentified() gives the same answer as the hook's isIdentified
+// ============================================================================
+
+describe('Encatch.isIdentified()', () => {
+  const agree = (r: Awaited<ReturnType<typeof renderProvider>>) => {
+    expect(r.Encatch.isIdentified()).toBe(r.latest().isIdentified);
+    return r.Encatch.isIdentified();
+  };
+
+  it('is false before init finishes', async () => {
+    const p = await loadProvider();
+    expect(p.Encatch.isIdentified()).toBe(false);
+  });
+
+  it('visitor: false', async () => {
+    const r = await renderProvider(null);
+    expect(agree(r)).toBe(false);
+    await r.unmount();
+  });
+
+  it('after an identify succeeds: true', async () => {
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    expect(agree(r)).toBe(true);
+    await r.unmount();
+  });
+
+  it('returning user restored at launch: true as soon as init finishes', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider(null, {
+      storedBeforeLaunch: { '@encatch/user_name': 'alice', '@encatch/user_id_alice': server.userId('alice') },
+    });
+    expect(agree(r)).toBe(true);
+    await r.unmount();
+  });
+
+  it('new user, first identify still in flight: false', async () => {
+    installMock({ scenario: { latencyMs: 0, faults: [{ endpoint: 'identify-user', count: 1, delayMs: 500 }] } });
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 100);
+    expect(agree(r)).toBe(false);
+    await r.run(() => {}, 600);
+    expect(agree(r)).toBe(true);
+    await r.unmount();
+  });
+
+  it('new user, first identify failed: false', async () => {
+    installMock({ scenario: { latencyMs: 0, faults: [{ endpoint: 'identify-user', count: 1, status: 400 }] } });
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}), 200);
+    expect(agree(r)).toBe(false);
+    await r.unmount();
+  });
+
+  it('switch from A to B: stays true (A) while B is in flight and after B fails', async () => {
+    installMock({
+      scenario: { latencyMs: 0, faults: [{ endpoint: 'identify-user', count: 1, match: { userName: 'bob' }, delayMs: 300, status: 400 }] },
+    });
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+
+    await r.run(() => r.Encatch.identifyUser('bob').catch(() => {}), 100);
+    expect(agree(r)).toBe(true);
+    expect(r.latest().userName).toBe('alice');
+
+    await r.run(() => {}, 400);
+    expect(agree(r)).toBe(true);
+    expect(r.latest().userName).toBe('alice');
+    await r.unmount();
+  });
+
+  it('switch from A to B: true for B once B succeeds', async () => {
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    await r.run(() => r.Encatch.identifyUser('bob').catch(() => {}));
+    expect(agree(r)).toBe(true);
+    expect(r.latest().userName).toBe('bob');
+    await r.unmount();
+  });
+
+  it('after resetUser: false', async () => {
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    await r.run(() => r.latest().resetUser());
+    expect(agree(r)).toBe(false);
+    await r.unmount();
+  });
+
+  it('after the server reports userPendingRetryExhausted: false', async () => {
+    installMock({
+      scenario: {
+        latencyMs: 0,
+        faults: [{ endpoint: 'track-event', count: 1, status: 200, body: { message: 'ok', userPendingRetryExhausted: true } }],
+      },
+    });
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    await r.run(() => r.Encatch.trackEvent('anything').catch(() => {}), 300);
+    expect(agree(r)).toBe(false);
+    await r.unmount();
+  });
+
+  it('after clearAll: false', async () => {
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    await r.run(() => r.Encatch.clearAll());
+    expect(r.Encatch.isIdentified()).toBe(false);
+    expect(r.latest().isIdentified).toBe(false);
+    await r.unmount();
+  });
+
+  it('stopSession does not change it', async () => {
+    const r = await renderProvider(null);
+    await r.run(() => r.Encatch.identifyUser('alice').catch(() => {}));
+    await r.run(() => r.Encatch.stopSession());
+    expect(agree(r)).toBe(true);
     await r.unmount();
   });
 });

@@ -1,12 +1,11 @@
 /**
- * The hotfix must not change the public API (1.4.4 is a patch release).
+ * 1.5.0 may only add to the public API, never change or remove anything.
  *
  * Builds the type declarations from src/ into a temporary folder and compares
- * them with the PUBLISHED 1.4.3 declarations (npm alias `sdk-1.4.3`).
+ * them with the PUBLISHED 1.4.4 declarations (npm alias `sdk-1.4.4`).
  *
- * The only allowed difference is the optional debug hooks agreed for 1.4.4
- * (plan step 11): `onRequest?` / `onResponse?` on EncatchConfig and their info
- * types, named in ALLOWED_NEW_TYPES. Anything else fails this test.
+ * The only allowed differences are the 1.5.0 additions listed in
+ * ALLOWED_NEW_MEMBERS. Anything else fails this test.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -15,8 +14,18 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(__dirname, '..');
-const PUBLISHED = path.join(ROOT, 'node_modules/sdk-1.4.3/dist/index.d.ts');
-const ALLOWED_NEW_TYPES = ['EncatchRequestInfo', 'EncatchResponseInfo'];
+const PUBLISHED = path.join(ROOT, 'node_modules/sdk-1.4.4/dist/index.d.ts');
+/** New one-line members in 1.5.0, as they appear in the declarations. */
+const ALLOWED_NEW_MEMBERS = [
+  // Encatch.isIdentified()
+  'isIdentified(): boolean;',
+  // Internal setter used by EncatchProvider for autoStartVisitorSession
+  '_setAutoStartVisitorSession(enabled: boolean): void;',
+  // EncatchProvider prop
+  'autoStartVisitorSession?: boolean;',
+  // EncatchConfig option
+  'persistUserAcrossRestarts?: boolean;',
+];
 
 function buildDeclarations(): string {
   const out = mkdtempSync(path.join(tmpdir(), 'encatch-api-'));
@@ -47,45 +56,28 @@ function normalise(dts: string): string {
     .join('\n');
 }
 
-/** Removes `onRequest?:` / `onResponse?:` members, including ones that span several lines. */
-function withoutHookMembers(dts: string): string {
-  const lines = dts.split('\n');
-  const kept: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^\s*on(Request|Response)\?:/.test(lines[i])) {
-      kept.push(lines[i]);
-      continue;
-    }
-    // Skip until brackets balance and the member ends with ';'.
-    let depth = 0;
-    for (; i < lines.length; i++) {
-      for (const ch of lines[i]) {
-        if ('({['.includes(ch)) depth++;
-        if (')}]'.includes(ch)) depth--;
-      }
-      if (depth <= 0 && lines[i].trimEnd().endsWith(';')) break;
-    }
-  }
-  return kept.join('\n');
-}
-
-/** Removes the allowed 1.4.4 additions, so what's left must equal 1.4.3. */
-function withoutAllowedAdditions(dts: string): string {
-  let out = withoutHookMembers(dts);
-  for (const name of ALLOWED_NEW_TYPES) {
-    out = out
-      .replace(new RegExp(`^(export )?(declare )?interface ${name}\\b[\\s\\S]*?^}\\n?`, 'm'), '')
-      .replace(new RegExp(`^(export )?(declare )?type ${name}\\b[^;]*;\\n?`, 'm'), '')
-      .replace(new RegExp(`\\s*(type )?${name},?`, 'g'), '');
-  }
-  return normalise(out);
+/** Removes the allowed 1.5.0 additions, so what's left must equal 1.4.4. */
+function withoutAllowedAdditions(dts: string): { rest: string; found: string[] } {
+  const found: string[] = [];
+  const rest = normalise(dts)
+    .split('\n')
+    .filter((l) => {
+      const allowed = ALLOWED_NEW_MEMBERS.includes(l.trim());
+      if (allowed) found.push(l.trim());
+      return !allowed;
+    })
+    .join('\n');
+  return { rest, found };
 }
 
 describe('public API', () => {
-  it('matches the published 1.4.3 declarations (apart from the allowed optional debug hooks)', () => {
+  it('matches the published 1.4.4 declarations, apart from the 1.5.0 additions', () => {
     const built = buildDeclarations();
     const published = normalise(readFileSync(PUBLISHED, 'utf8'));
-    expect(withoutAllowedAdditions(built)).toBe(published);
+    const { rest, found } = withoutAllowedAdditions(built);
+    expect(rest).toBe(published);
+    // Each addition is really there (the list doesn't hide a removed member).
+    expect([...new Set(found)].sort()).toEqual([...ALLOWED_NEW_MEMBERS].sort());
   }, 60_000);
 });
 

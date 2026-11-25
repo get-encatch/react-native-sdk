@@ -94,6 +94,7 @@
     "react-test-renderer": "19.2.4",
     "release-it": "^21.1.1",
     "sdk-1.4.3": "npm:@encatch/react-native-sdk@1.4.3",
+    "sdk-1.4.4": "npm:@encatch/react-native-sdk@1.4.4",
     "tsup": "^8.5.1",
     "typescript": "~5.9.3",
     "vitest": "^3.2.7",

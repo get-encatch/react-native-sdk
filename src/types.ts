@@ -58,6 +58,17 @@ export interface EncatchConfig {
    * Never receives the API key, headers, signature or response body.
    */
   onResponse?: (info: EncatchResponseInfo) => void;
+  /**
+   * Keep the identified user across app restarts.
+   * - true: the user name, user ID and secure signature are saved on the device
+   *   and restored at the next launch, so the app doesn't need to identify again.
+   * - false: they're kept in memory for the current app run only; nothing about
+   *   the user is saved on the device, and user data an earlier run saved is
+   *   deleted at init. Each launch starts as a visitor: call identifyUser() on
+   *   every launch.
+   * @default true
+   */
+  persistUserAcrossRestarts?: boolean;
 }
 
 /** Passed to EncatchConfig.onRequest. */

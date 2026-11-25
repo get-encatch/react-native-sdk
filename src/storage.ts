@@ -61,12 +61,66 @@ export async function clearSession(): Promise<void> {
 }
 
 // ============================================================================
+// Where user data lives: the device (default) or memory only
+// (EncatchConfig.persistUserAcrossRestarts false). User data = the user name,
+// user IDs, secure signatures and survey history (feedback transactions).
+// ============================================================================
+
+const USER_KEY_PATTERN = new RegExp(
+  `^(${[KEY_USER_NAME, KEY_USER_ID_PREFIX, KEY_USER_SIGNATURE_PREFIX, KEY_FT_PREFIX]
+    .map((k) => k.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'))
+    .join('|')})`
+);
+
+let persistUser = true;
+const memoryUserStore = new Map<string, string>();
+
+const userStore = {
+  getItem: async (key: string): Promise<string | null> =>
+    persistUser ? AsyncStorage.getItem(key) : memoryUserStore.get(key) ?? null,
+  setItem: async (key: string, value: string): Promise<void> => {
+    if (persistUser) await AsyncStorage.setItem(key, value);
+    else memoryUserStore.set(key, value);
+  },
+  removeItem: async (key: string): Promise<void> => {
+    if (persistUser) await AsyncStorage.removeItem(key);
+    else memoryUserStore.delete(key);
+  },
+};
+
+/**
+ * persistUserAcrossRestarts: true saves user data on the device (restored at the
+ * next launch); false keeps it in memory for this app run only.
+ */
+export function setPersistUserAcrossRestarts(enabled: boolean): void {
+  persistUser = enabled;
+}
+
+/** Forgets the in-memory user data (persistUserAcrossRestarts false). */
+export function clearMemoryUserData(): void {
+  memoryUserStore.clear();
+}
+
+/**
+ * Deletes every piece of user data saved on the device (by an earlier run with
+ * persistUserAcrossRestarts true). Device ID, preferences and the saved stop stay.
+ */
+export async function clearStoredUserData(): Promise<void> {
+  try {
+    const keys = (await AsyncStorage.getAllKeys()).filter((k) => USER_KEY_PATTERN.test(k));
+    if (keys.length > 0) await AsyncStorage.multiRemove(keys);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ============================================================================
 // User Name
 // ============================================================================
 
 export async function getUserName(): Promise<string | null> {
   try {
-    return await AsyncStorage.getItem(KEY_USER_NAME);
+    return await userStore.getItem(KEY_USER_NAME);
   } catch {
     return null;
   }
@@ -74,7 +128,7 @@ export async function getUserName(): Promise<string | null> {
 
 export async function setUserName(name: string): Promise<void> {
   try {
-    await AsyncStorage.setItem(KEY_USER_NAME, name);
+    await userStore.setItem(KEY_USER_NAME, name);
   } catch {
     /* ignore */
   }
@@ -82,7 +136,7 @@ export async function setUserName(name: string): Promise<void> {
 
 export async function clearUserName(): Promise<void> {
   try {
-    await AsyncStorage.removeItem(KEY_USER_NAME);
+    await userStore.removeItem(KEY_USER_NAME);
   } catch {
     /* ignore */
   }
@@ -94,7 +148,7 @@ export async function clearUserName(): Promise<void> {
 
 export async function getUserId(userName: string): Promise<string | null> {
   try {
-    return await AsyncStorage.getItem(`${KEY_USER_ID_PREFIX}${userName}`);
+    return await userStore.getItem(`${KEY_USER_ID_PREFIX}${userName}`);
   } catch {
     return null;
   }
@@ -102,7 +156,7 @@ export async function getUserId(userName: string): Promise<string | null> {
 
 export async function setUserId(userName: string, userId: string): Promise<void> {
   try {
-    await AsyncStorage.setItem(`${KEY_USER_ID_PREFIX}${userName}`, userId);
+    await userStore.setItem(`${KEY_USER_ID_PREFIX}${userName}`, userId);
   } catch {
     /* ignore */
   }
@@ -110,7 +164,7 @@ export async function setUserId(userName: string, userId: string): Promise<void>
 
 export async function clearUserId(userName: string): Promise<void> {
   try {
-    await AsyncStorage.removeItem(`${KEY_USER_ID_PREFIX}${userName}`);
+    await userStore.removeItem(`${KEY_USER_ID_PREFIX}${userName}`);
   } catch {
     /* ignore */
   }
@@ -129,7 +183,7 @@ export interface StoredSignature {
 
 export async function getUserSignature(userName: string): Promise<StoredSignature | null> {
   try {
-    const raw = await AsyncStorage.getItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
+    const raw = await userStore.getItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed.signature === 'string'
@@ -142,7 +196,7 @@ export async function getUserSignature(userName: string): Promise<StoredSignatur
 
 export async function setUserSignature(userName: string, value: StoredSignature): Promise<void> {
   try {
-    await AsyncStorage.setItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`, JSON.stringify(value));
+    await userStore.setItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`, JSON.stringify(value));
   } catch {
     /* ignore */
   }
@@ -150,7 +204,7 @@ export async function setUserSignature(userName: string, value: StoredSignature)
 
 export async function clearUserSignature(userName: string): Promise<void> {
   try {
-    await AsyncStorage.removeItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
+    await userStore.removeItem(`${KEY_USER_SIGNATURE_PREFIX}${userName}`);
   } catch {
     /* ignore */
   }
@@ -167,7 +221,7 @@ function ftKey(identityKey: string): string {
 
 export async function getFeedbackTransactions(identityKey: string): Promise<string | null> {
   try {
-    return await AsyncStorage.getItem(ftKey(identityKey));
+    return await userStore.getItem(ftKey(identityKey));
   } catch {
     return null;
   }
@@ -178,7 +232,7 @@ export async function setFeedbackTransactions(
   value: string
 ): Promise<void> {
   try {
-    await AsyncStorage.setItem(ftKey(identityKey), value);
+    await userStore.setItem(ftKey(identityKey), value);
   } catch {
     /* ignore */
   }
@@ -186,7 +240,7 @@ export async function setFeedbackTransactions(
 
 export async function clearFeedbackTransactions(identityKey: string): Promise<void> {
   try {
-    await AsyncStorage.removeItem(ftKey(identityKey));
+    await userStore.removeItem(ftKey(identityKey));
   } catch {
     /* ignore */
   }
