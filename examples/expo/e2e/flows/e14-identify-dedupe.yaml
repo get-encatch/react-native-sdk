@@ -1,7 +1,10 @@
 # E14 (1.5.0): identifyUser dedupe and setUserProperties.
-# Launch 1: sign in (identify with traits) → "Identify again" (duplicate, not sent)
-#   → "Set properties" twice (never deduped, both sent).
-# Restart (user kept) → "Identify again" (first of the run, sent) → again (not sent).
+# Launch 1: sign in (identify, no traits)
+#   → "Identify again" (no traits: duplicate, not sent)
+#   → "Identify (plan free)" twice (first sent, second a duplicate: same traits)
+#   → "Set properties" twice (never deduped: both sent; also clears identify's traits memory)
+#   → "Identify (plan free)" again (sent: the memory was cleared).
+# Restart (user kept) → "Identify again" twice (first of the run sent, second not).
 appId: com.encatch.expotester
 ---
 - runFlow: common/setup.yaml
@@ -9,17 +12,21 @@ appId: com.encatch.expotester
 - runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
 - scrollUntilVisible:
     element:
-      id: home-identify-again
+      id: home-set-properties
     direction: DOWN
-- tapOn:
-    id: home-identify-again
+    centerElement: true
+- tapOn: { id: home-identify-again, retryTapIfNoChange: false }
 - runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
-- tapOn:
-    id: home-set-properties
+- tapOn: { id: home-identify-traits, retryTapIfNoChange: false }
 - runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
-- tapOn:
-    id: home-set-properties
-- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn: { id: home-identify-traits, retryTapIfNoChange: false }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn: { id: home-set-properties, retryTapIfNoChange: false }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn: { id: home-set-properties, retryTapIfNoChange: false }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn: { id: home-identify-traits, retryTapIfNoChange: false }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }
 - stopApp
 - launchApp:
     clearState: false
@@ -29,11 +36,10 @@ appId: com.encatch.expotester
     timeout: 30000
 - scrollUntilVisible:
     element:
-      id: home-identify-again
+      id: home-set-properties
     direction: DOWN
-- tapOn:
-    id: home-identify-again
+    centerElement: true
+- tapOn: { id: home-identify-again, retryTapIfNoChange: false }
 - runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
-- tapOn:
-    id: home-identify-again
-- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- tapOn: { id: home-identify-again, retryTapIfNoChange: false }
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 5 } }

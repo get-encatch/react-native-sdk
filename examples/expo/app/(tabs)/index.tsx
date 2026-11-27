@@ -133,6 +133,12 @@ export default function HomeScreen() {
         <Text style={styles.buttonText}>Identify again (no traits)</Text>
       </Pressable>
       <Pressable
+        testID="home-identify-traits"
+        style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && styles.buttonPressed]}
+        onPress={() => userName && identifyUser(userName, { $set: { e2e_plan: 'free' } })}>
+        <Text style={styles.buttonText}>Identify again (plan free)</Text>
+      </Pressable>
+      <Pressable
         testID="home-set-properties"
         style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && styles.buttonPressed]}
         onPress={() => userName && setUserProperties(userName, { $set: { e2e_plan: 'pro' }, $increment: { e2e_clicks: 1 } })}>
@@ -150,6 +156,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
+    // Room to scroll the last buttons clear of the tab bar.
+    paddingBottom: 120,
   },
   title: {
     fontSize: 20,
