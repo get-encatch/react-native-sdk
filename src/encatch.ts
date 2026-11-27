@@ -121,6 +121,10 @@ const COLLAPSE_WINDOW_MS = 1_000;
 function stableKey(value: unknown): string {
   const norm = (v: unknown): unknown => {
     if (v instanceof Date) return v.toISOString();
+    // Fingerprint what JSON would send: honour toJSON (as JSON.stringify does).
+    if (v && typeof v === 'object' && typeof (v as { toJSON?: unknown }).toJSON === 'function') {
+      return norm((v as { toJSON: () => unknown }).toJSON());
+    }
     if (Array.isArray(v)) return v.map(norm);
     if (v && typeof v === 'object') {
       return Object.keys(v as Record<string, unknown>)
@@ -136,21 +140,25 @@ function stableKey(value: unknown): string {
 }
 
 /**
- * True when the value holds something a request body can't carry: a circular
- * reference, a BigInt or an invalid Date (JSON.stringify would throw).
+ * True when the value can't go in a request body: JSON.stringify throws on it
+ * (circular reference, BigInt, a toJSON that returns one), or it holds an
+ * invalid Date (toISOString throws).
  */
-function hasUnsendableValue(value: unknown, seen: Set<object> = new Set()): boolean {
-  if (typeof value === 'bigint') return true;
-  if (value instanceof Date) return Number.isNaN(value.getTime());
-  if (value && typeof value === 'object') {
-    if (seen.has(value)) return true;
-    seen.add(value);
-    const children = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
-    const bad = children.some((v) => hasUnsendableValue(v, seen));
-    seen.delete(value);
-    return bad;
+function hasUnsendableValue(value: unknown): boolean {
+  if (value === undefined) return false;
+  try {
+    JSON.stringify(value);
+  } catch {
+    return true;
   }
-  return false;
+  const seen = new Set<object>();
+  const invalidDate = (v: unknown): boolean => {
+    if (v instanceof Date) return Number.isNaN(v.getTime());
+    if (!v || typeof v !== 'object' || seen.has(v)) return false;
+    seen.add(v);
+    return (Array.isArray(v) ? v : Object.values(v as Record<string, unknown>)).some(invalidDate);
+  };
+  return invalidDate(value);
 }
 
 /**
@@ -166,7 +174,9 @@ function traitsForDedupe(traits?: UserTraits): Record<string, unknown> | null {
     if (Array.isArray(v)) {
       if (v.length > 0) out[op] = op === '$unset' ? [...v].sort() : v;
     } else if (typeof v === 'object') {
-      if (Object.keys(v).length > 0) out[op] = v;
+      const defined: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (x !== undefined) defined[k] = x;
+      if (Object.keys(defined).length > 0) out[op] = defined;
     } else {
       out[op] = v;
     }
@@ -298,7 +308,7 @@ class EncatchSDK {
   // Event callbacks (external SDK consumers via Encatch.on())
   private _eventCallbacks: EventCallback[] = [];
 
-  // Dedupe: the last identify sent or in flight, and recent event / screen calls.
+  // Dedupe: identify memory, and recent event / screen calls.
   /**
    * identifyUser() dedupe, for this app run only (1.5.0, PostHog-style): the user
    * an identify was sent (or is in flight) for, the last traits and the last
@@ -308,8 +318,13 @@ class EncatchSDK {
   private _identifiedName: string | null = null;
   private _lastTraitsKey: string | null = null;
   private _lastOptionsKey: string | null = null;
+  /** Locale / country the last identify carried (only when it gave them). */
+  private _lastIdentifyLocale: string | null = null;
+  private _lastIdentifyCountry: string | null = null;
   /** The identify the memory above belongs to (a failed or dropped one clears it). */
   private _identifyMemoryToken: object | null = null;
+  /** The identify that set _lastTraitsKey (when it's dropped, those traits weren't sent). */
+  private _traitsMemoryToken: object | null = null;
   private _lastEventAt = new Map<string, number>();
   private _lastScreen: { name: string; at: number } | null = null;
 
@@ -440,7 +455,7 @@ class EncatchSDK {
     options?: IdentifyOptions
   ): Promise<void> {
     // Traits a request body can't carry would fail inside the queue: refuse now.
-    if (hasUnsendableValue(traits)) {
+    if (hasUnsendableValue(traits) || hasUnsendableValue(options?.secure)) {
       this._logger.warn(
         `identifyUser "${userName}" ignored: traits contain a value that can't be sent (circular object, BigInt or invalid Date).`
       );
@@ -449,21 +464,28 @@ class EncatchSDK {
 
     // Dedupe (docs/1.5.0-IDENTIFY-DEDUPE-PLAN.md). Sent: the first identify of
     // this app run or a different user, a changed signature, a locale / country
-    // that differs from the current one, new traits, and always while the
-    // signature is expired or the session is stopped (an identify ends both).
-    // Not sent: the same user again with no traits, or the same traits, as the
-    // last identify sent or still in flight.
-    const dedupeTraits = traitsForDedupe(traits);
-    const traitsKey = dedupeTraits ? stableKey(dedupeTraits) : null;
-    const optionsKey = stableKey({
-      signature: options?.secure?.signature ?? null,
-      signatureTime: options?.secure?.generatedDateTimeinUTC ?? null,
-    });
-    const localeChanged = options?.locale != null && options.locale !== this._locale;
-    const countryChanged = options?.country != null && options.country !== this._country;
+    // that differs from what the last identify carried, new traits. Not sent:
+    // the same user again with no traits, or the same traits, as the last
+    // identify sent or still in flight. stopSession() and a signature expiry
+    // clear this memory, so the next identify goes out (it ends both).
+    let traitsKey: string | null;
+    let optionsKey: string;
+    try {
+      const dedupeTraits = traitsForDedupe(traits);
+      traitsKey = dedupeTraits ? stableKey(dedupeTraits) : null;
+      optionsKey = stableKey({
+        signature: options?.secure?.signature ?? null,
+        signatureTime: options?.secure?.generatedDateTimeinUTC ?? null,
+      });
+    } catch {
+      this._logger.warn(
+        `identifyUser "${userName}" ignored: traits contain a value that can't be sent (circular object, BigInt or invalid Date).`
+      );
+      return;
+    }
+    const localeChanged = options?.locale != null && options.locale !== this._lastIdentifyLocale;
+    const countryChanged = options?.country != null && options.country !== this._lastIdentifyCountry;
     const duplicate =
-      !this._signatureExpired &&
-      !this._isSessionStopped &&
       userName === this._identifiedName &&
       optionsKey === this._lastOptionsKey &&
       !localeChanged &&
@@ -478,10 +500,20 @@ class EncatchSDK {
       return;
     }
     const memoryToken = {};
-    if (userName !== this._identifiedName) this._lastTraitsKey = null;
+    if (userName !== this._identifiedName) {
+      this._lastTraitsKey = null;
+      this._traitsMemoryToken = null;
+      this._lastIdentifyLocale = null;
+      this._lastIdentifyCountry = null;
+    }
     this._identifiedName = userName;
     this._lastOptionsKey = optionsKey;
-    if (traitsKey !== null) this._lastTraitsKey = traitsKey;
+    if (traitsKey !== null) {
+      this._lastTraitsKey = traitsKey;
+      this._traitsMemoryToken = memoryToken;
+    }
+    if (options?.locale != null) this._lastIdentifyLocale = options.locale;
+    if (options?.country != null) this._lastIdentifyCountry = options.country;
     this._identifyMemoryToken = memoryToken;
 
     // Switching user: take this user's stored id (or none) together with the
@@ -600,6 +632,11 @@ class EncatchSDK {
     }, undefined, () => {
       // Dropped without succeeding: allow the same identify to be sent again.
       if (this._identifyMemoryToken === memoryToken) this._clearIdentifyMemory();
+      // Its traits weren't sent, even if a later identify (without traits) took over.
+      else if (this._traitsMemoryToken === memoryToken) {
+        this._lastTraitsKey = null;
+        this._traitsMemoryToken = null;
+      }
     });
 
     // Immediately flush so identify is best-effort real-time
@@ -1499,6 +1536,8 @@ class EncatchSDK {
   async stopSession(): Promise<void> {
     if (this._isSessionStopped) return;
     this._isSessionStopped = true;
+    // The next identify turns the session back on, so it must go out even if it matches.
+    this._clearIdentifyMemory();
     this._isSessionPaused = false;
     this._stopPingInterval();
     _internalEmitter.emit('dismissForm', {});
@@ -1517,6 +1556,8 @@ class EncatchSDK {
   private _onSignatureExpired(): void {
     if (this._signatureExpired) return;
     this._signatureExpired = true;
+    // The next identify (with a fresh signature) must go out, even if it matches.
+    this._clearIdentifyMemory();
     console.warn(
       '[Encatch] Secure identify signature expired (401). Call identifyUser() with a fresh signature; ' +
         'until then events, screens, ping and automatic surveys are skipped and survey submits are held.'
@@ -1574,7 +1615,10 @@ class EncatchSDK {
     this._identifiedName = null;
     this._lastTraitsKey = null;
     this._lastOptionsKey = null;
+    this._lastIdentifyLocale = null;
+    this._lastIdentifyCountry = null;
     this._identifyMemoryToken = null;
+    this._traitsMemoryToken = null;
   }
 
   /** Runs identify / reset operations one after the other, in call order. */
