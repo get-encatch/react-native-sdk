@@ -5,7 +5,8 @@
  * them with the PUBLISHED 1.4.4 declarations (npm alias `sdk-1.4.4`).
  *
  * The only allowed differences are the 1.5.0 additions listed in
- * ALLOWED_NEW_MEMBERS. Anything else fails this test.
+ * ALLOWED_NEW_MEMBERS, ALLOWED_NEW_BLOCKS, ALLOWED_NEW_EXPORTS and
+ * ALLOWED_CHANGED_LINES. Anything else fails this test.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -28,7 +29,18 @@ const ALLOWED_NEW_MEMBERS = [
   // Encatch.setUserProperties() and the hook's setUserProperties
   'setUserProperties(userName: string, traits: UserTraits): Promise<void>;',
   'setUserProperties: (userName: string, traits: UserTraits) => void;',
+  // EncatchConfig option
+  'onSignatureExpired?: (info: SignatureExpiredInfo) => void;',
 ];
+
+/** New multi-line declarations in 1.5.0, exactly as normalise() writes them. */
+const ALLOWED_NEW_BLOCKS = [
+  // The type passed to onSignatureExpired
+  ['interface SignatureExpiredInfo {', '    userName: string;', '}'].join('\n'),
+];
+
+/** New type names in the final `export { … }` statement. */
+const ALLOWED_NEW_EXPORTS = ['SignatureExpiredInfo'];
 
 /**
  * Lines changed in 1.5.0, new form -> published 1.4.4 form: only additions to a
@@ -71,7 +83,19 @@ function normalise(dts: string): string {
 /** Removes the allowed 1.5.0 additions, so what's left must equal 1.4.4. */
 function withoutAllowedAdditions(dts: string): { rest: string; found: string[] } {
   const found: string[] = [];
-  const rest = normalise(dts)
+  let text = normalise(dts);
+  for (const block of ALLOWED_NEW_BLOCKS) {
+    const at = text.indexOf(`\n${block}\n`);
+    if (at === -1) continue;
+    found.push(block);
+    text = text.slice(0, at) + text.slice(at + block.length + 1);
+  }
+  for (const name of ALLOWED_NEW_EXPORTS) {
+    const before = text;
+    text = text.replace(new RegExp(`^(export \\{.*) type ${name},(.*\\};)$`, 'm'), '$1$2');
+    if (text !== before) found.push(`export ${name}`);
+  }
+  const rest = text
     .split('\n')
     .filter((l) => {
       const allowed = ALLOWED_NEW_MEMBERS.includes(l.trim());
@@ -93,7 +117,8 @@ describe('public API', () => {
     const { rest, found } = withoutAllowedAdditions(built);
     expect(rest).toBe(published);
     // Each addition is really there (the list doesn't hide a removed member).
-    expect([...new Set(found)].sort()).toEqual([...ALLOWED_NEW_MEMBERS].sort());
+    const expected = [...ALLOWED_NEW_MEMBERS, ...ALLOWED_NEW_BLOCKS, ...ALLOWED_NEW_EXPORTS.map((n) => `export ${n}`)];
+    expect([...new Set(found)].sort()).toEqual(expected.sort());
     // Each changed line is really there in its new form.
     const builtLines = normalise(built).split('\n').map((l) => l.trim());
     for (const line of Object.keys(ALLOWED_CHANGED_LINES)) expect(builtLines).toContain(line);

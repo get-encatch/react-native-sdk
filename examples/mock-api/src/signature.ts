@@ -8,13 +8,15 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * - user-gateway-service/ugw-auth/src/hash.rs     generate_hmac_signature (hex HMAC-SHA256)
  * - user-gateway-service/ugw-core/src/headers.rs  X-User-Name, X-User-Signature, X-User-Session-Time
  *
- * Only identify-user is checked. Policy: identity not required, timestamp validated
- * even without a secret, future timestamps allowed, expiry compared in whole minutes.
+ * Only identify-user is checked. Policy (gateway since 2026-11-27, encatch-user !722):
+ * identity not required; the session time applies only to a key with a secret; a signed
+ * time must be exactly 13 digits (epoch ms) and at most 5 minutes in the future; expiry
+ * compared in whole minutes.
  */
 export interface SignatureKey {
   /** The key's secret. Without one, the signature check is skipped. */
   secret?: string;
-  /** Signature lifetime in minutes. When > 0, the timestamp is signed and checked. */
+  /** Signature lifetime in minutes. When > 0 (and the key has a secret), the timestamp is signed and checked. */
   sessionTimeMinutes?: number;
 }
 
@@ -25,6 +27,9 @@ export type SignatureResult =
   | 'invalid-timestamp'
   | 'invalid-signature'
   | 'expired';
+
+/** How far ahead of the gateway's clock a signed time may be. */
+export const FUTURE_SKEW_MS = 5 * 60_000;
 
 /** Hex HMAC-SHA256, as the customer's backend and the gateway compute it. */
 export function hmacHex(data: string, secret: string): string {
@@ -59,9 +64,13 @@ export function checkIdentifySignature(
     if (a.length !== b.length || !timingSafeEqual(a, b)) return 'invalid-signature';
   }
 
-  if (expiry <= 0) return 'ok';
+  // The session time is part of the signature: a key without a secret has none to expire.
+  if (expiry <= 0 || !key.secret) return 'ok';
   if (!timestamp) return 'missing-timestamp';
-  if (!/^-?\d+$/.test(timestamp)) return 'invalid-timestamp';
+  // Exactly 13 digits: the signed data is `name + time` with no separator, so a looser
+  // time would let one signature pass for another name (`alice1` + T as `alice` + `1T`).
+  if (!/^\d{13}$/.test(timestamp)) return 'invalid-timestamp';
+  if (Number(timestamp) > nowMs + FUTURE_SKEW_MS) return 'invalid-timestamp';
   const ageMinutes = Math.trunc((nowMs - Number(timestamp)) / 60_000);
   return ageMinutes > expiry ? 'expired' : 'ok';
 }

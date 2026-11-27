@@ -51,7 +51,7 @@ import {
   getTimezone,
 } from './device-info';
 import { currentQueueAttempt, enqueue, flush, removeQueued, startAppStateListener, stopAppStateListener } from './retry-queue';
-import { HttpError, httpStatusOf, parseRetryAfter } from './http-error';
+import { HttpError, errorReasonOf, httpStatusOf, parseRetryAfter } from './http-error';
 import { bucketOf, clearPauses, isPaused, pauseFor, pauseRemainingMs } from './rate-limit';
 import { createEncatchLogger, type EncatchLogger } from './logger';
 import { resolvePresentationTarget } from './form-presentation-registry';
@@ -253,7 +253,22 @@ class EncatchSDK {
    * the app identifies again: background calls are skipped, submits are held.
    */
   private _signatureExpired = false;
-  private _heldSubmits: SubmitFormRequest[] = [];
+  /**
+   * The user each survey was shown to (by feedbackConfigurationId; null for a
+   * visitor). A submit for it is made for that user, not whoever is current when
+   * the user taps submit (the app may have switched user while it was open).
+   */
+  private _formShownFor = new Map<string, string | null>();
+  /** Survey submits held while the signature is expired, with the user they were made for. */
+  private _heldSubmits: Array<{ params: SubmitFormRequest; user: string | null }> = [];
+  /**
+   * Users onSignatureExpired was called for because the app's own new signature
+   * was rejected as expired. Not called again for them until an identify for them
+   * succeeds, so a signature that keeps being rejected can't cause a loop.
+   * Entering the expired state always calls it (that happens once by itself) and
+   * adds the user here too.
+   */
+  private _expiryNotifiedFor = new Set<string>();
   /**
    * A confirmed identity: restored at init, or set when an identify reply is
    * applied; cleared by resetUser / clearAll. What isIdentified() and the hook's
@@ -355,6 +370,7 @@ class EncatchSDK {
   // Optional debug hooks (never given the API key, headers, signature or bodies).
   private _onRequest: EncatchConfig['onRequest'] = undefined;
   private _onResponse: EncatchConfig['onResponse'] = undefined;
+  private _signatureExpiredHook: EncatchConfig['onSignatureExpired'] = undefined;
 
   // Logger (uses react-native-logs when debugMode and package installed)
   private _logger: EncatchLogger = createEncatchLogger(false);
@@ -384,6 +400,7 @@ class EncatchSDK {
     this._onBeforeShowForm = config?.onBeforeShowForm;
     this._onRequest = config?.onRequest;
     this._onResponse = config?.onResponse;
+    this._signatureExpiredHook = config?.onSignatureExpired;
 
     this._logger.debug('Initializing SDK...');
 
@@ -544,8 +561,21 @@ class EncatchSDK {
     // (the server rejects a name without its id).
     if (userName !== this._userName) {
       const storedId = await getUserId(userName);
+      const previous = this._userName;
       this._userName = userName;
       this._userId = storedId;
+      // The expired state and held submits belong to the previous user's signature:
+      // end it and drop them, so that user's answers are never sent as this user.
+      // Done together with the name change, so no call goes out in between.
+      // Coming back to that user later starts afresh (onSignatureExpired can be called again).
+      if (previous) this._expiryNotifiedFor.delete(previous);
+      this._signatureExpired = false;
+      if (this._heldSubmits.length > 0) {
+        console.warn(
+          `[Encatch] ${this._heldSubmits.length} held survey submit(s) dropped: identifyUser() switched to another user`
+        );
+        this._heldSubmits = [];
+      }
       // Not confirmed until this user's identify succeeds (setUserProperties waits for it).
       this._confirmedName = null;
       await this._loadStoredSignature(userName);
@@ -613,6 +643,7 @@ class EncatchSDK {
         this._userSignatureTime = null;
         await clearUserSignature(userName);
       }
+      this._expiryNotifiedFor.delete(userName);
       this._endSignatureExpired();
       if (res.$feedbackTransactions) {
         this._feedbackTransactions = res.$feedbackTransactions;
@@ -689,6 +720,8 @@ class EncatchSDK {
   private _surveyIdleTimer: ReturnType<typeof setInterval> | null = null;
   /** Bumped by stop() / clearAll(): waits started before then give up. */
   private _lifecycleGen = 0;
+  /** Bumped by clearAll() only: a survey submit waiting from before then is dropped. */
+  private _clearAllGen = 0;
 
   private _waitForSurveyIdle(): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -1092,7 +1125,15 @@ class EncatchSDK {
     };
 
     try {
+      const shownFor = this._userName;
       const res = await this._post<ShowFormResponse>(ENDPOINTS.SHOW_FORM, req);
+      // Requested for a signed-in user who is no longer current (switched or signed
+      // out meanwhile): don't show it to someone else.
+      if (shownFor !== null && this._userName !== shownFor) {
+        this._logger.debug(`showForm ${formId}: not shown, the user changed while it was loading`);
+        return;
+      }
+      if (res.feedbackConfigurationId) this._formShownFor.set(res.feedbackConfigurationId, shownFor);
 
       if (res.$feedbackTransactions) {
         this._feedbackTransactions = res.$feedbackTransactions;
@@ -1191,6 +1232,8 @@ class EncatchSDK {
   /** The open survey was closed, dismissed or cleared. */
   private _markFormClosed(): void {
     this._isFormVisible = false;
+    // Closed (any way: after submit, X, back, a CTA): no longer tied to who it was shown to.
+    for (const id of this._openFormIds) this._formShownFor.delete(id);
     this._openFormIds = [];
     if (this._surveyIdleWaiters.length > 0) this._checkSurveyIdle();
   }
@@ -1280,6 +1323,7 @@ class EncatchSDK {
 
   /** POST dismiss-form (best effort). */
   private async _sendDismiss(formConfigurationId?: string): Promise<void> {
+    if (formConfigurationId) this._formShownFor.delete(formConfigurationId);
     const deviceInfo = await this._buildDeviceInfo();
     const req: DismissFormRequest = {
       formConfigurationId,
@@ -1331,10 +1375,36 @@ class EncatchSDK {
   // ============================================================================
 
   async submitForm(params: SubmitFormRequest): Promise<void> {
+    const formId = params.formDetails?.formConfigurationId;
+    // Shown to a visitor (null) or not shown by the SDK: made for whoever submits it.
+    // Kept until the survey closes, so a repeated final submit resolves the same way.
+    const forUser = (formId ? this._formShownFor.get(formId) : undefined) ?? this._userName;
+    return this._submitFormFor(params, forUser);
+  }
+
+  /**
+   * Sends a submit made for `forUser` (the user current when the survey was
+   * submitted). An identified user's answers are never sent as anyone else: if
+   * that user is no longer current when it would go out (switched or reset while
+   * it waited), it is dropped. A visitor's submit (`forUser` null) goes out as is.
+   */
+  private async _submitFormFor(params: SubmitFormRequest, forUser: string | null): Promise<void> {
     if (!this._initialized) return;
+    const gen = this._clearAllGen;
+    const userChanged = () => {
+      if (gen !== this._clearAllGen) {
+        // clearAll() while it waited (consent withdrawn): everything from before is gone.
+        console.warn('[Encatch] A survey submit was dropped: clearAll() ran while it was waiting to be sent.');
+        return true;
+      }
+      if (forUser === null || this._userName === forUser) return false;
+      console.warn('[Encatch] A survey submit was dropped: the user it was made for is no longer the current user.');
+      return true;
+    };
+    if (userChanged()) return;
     // Secure signature expired: hold the answers until the app identifies again.
     if (this._signatureExpired) {
-      this._holdSubmit(params);
+      this._holdSubmit(params, forUser);
       return;
     }
 
@@ -1350,6 +1420,8 @@ class EncatchSDK {
     for (let attempt = 1; attempt <= SUBMIT_MAX_ATTEMPTS; attempt++) {
       const wait = pauseRemainingMs('submit-form');
       if (wait > 0) await new Promise<void>((resolve) => setTimeout(() => resolve(), wait));
+      // Checked right before sending: _post builds the identity headers synchronously.
+      if (userChanged()) return;
       try {
         const res = await this._post<SubmitFormResponse>(ENDPOINTS.SUBMIT_FORM, req, { attempt });
         if (res.$feedbackTransactions) {
@@ -1362,7 +1434,7 @@ class EncatchSDK {
       } catch (err) {
         if (httpStatusOf(err) === 429 && attempt < SUBMIT_MAX_ATTEMPTS) continue;
         if (httpStatusOf(err) === 401 && this._signatureExpired) {
-          this._holdSubmit(params);
+          this._holdSubmit(params, forUser);
           return;
         }
         this._logger.warn('submitForm API error:', err);
@@ -1642,6 +1714,7 @@ class EncatchSDK {
     // Release anything waiting for a survey to close, and drop waiting
     // setUserProperties updates (they were for the user being cleared).
     this._lifecycleGen += 1;
+    this._clearAllGen += 1;
     this._checkSurveyIdle(true);
     this._userPropsWaiting = [];
     this._userPropsBusy = false;
@@ -1667,9 +1740,12 @@ class EncatchSDK {
     this._userSignature = null;
     this._userSignatureTime = null;
     this._signatureExpired = false;
+    this._expiryNotifiedFor.clear();
     this._heldSubmits = [];
+    this._formShownFor.clear();
     this._onRequest = undefined;
     this._onResponse = undefined;
+    this._signatureExpiredHook = undefined;
     this._feedbackTransactions = null;
     this._deviceId = null;
     this._sessionId = null;
@@ -1775,7 +1851,64 @@ class EncatchSDK {
     this._userSignatureTime = stored?.time ?? null;
   }
 
-  /** The stored session-time signature expired: warn once and wait for a new identify. */
+  /**
+   * A 401: did the current user's signature expire? The gateway says so with
+   * `"reason":"user_signature_expired"` (since 2026-11-27; it checks the signature
+   * on identify-user, and SV8 would extend that to every request). Any other 401
+   * (inactive key, wrong referer, wrong signature) is not an expiry, except on
+   * older gateways, which give no reason: there a 401 on the identify that carried
+   * the stored session-time signature (setUserProperties) is taken as the expiry.
+   *
+   * - A reply for a user who has since been reset or switched away from is ignored.
+   * - The app's own new signature (identifyUser with `secure`) rejected as expired:
+   *   the app is told (once per user until an identify succeeds), but nothing else
+   *   changes. That identify simply failed, as any rejected identify does; the
+   *   stored signature and tracking are kept.
+   * - The stored signature (setUserProperties, an identify that re-sent it, or any
+   *   request under SV8): only if it is still the one in use (a late reply for an
+   *   older one doesn't count). Enters the expired state and tells the app.
+   */
+  private _checkSignatureExpiry(
+    responseText: string,
+    headers: Record<string, string>,
+    opts?: { identifyUserName?: string; storedSignature?: boolean }
+  ): void {
+    const user = opts?.identifyUserName ?? headers['X-User-Name'];
+    if (!user || user !== this._userName) return;
+    const expiredReason = errorReasonOf(responseText) === 'user_signature_expired';
+    const signature = headers['X-User-Signature'];
+    // A new identify that re-sent the stored signature counts as the stored one.
+    const isStored = !!signature && signature === this._userSignature;
+    if (opts?.identifyUserName && !opts.storedSignature && !(isStored && expiredReason)) {
+      if (!expiredReason) return;
+      console.warn(
+        `[Encatch] identifyUser("${user}") rejected: the secure signature has expired. Get a fresh signature and call identifyUser() again.`
+      );
+      if (this._expiryNotifiedFor.has(user)) return;
+      this._expiryNotifiedFor.add(user);
+      this._notifySignatureExpired(user);
+      return;
+    }
+    if (!isStored) return;
+    if (expiredReason || (opts?.storedSignature && headers['X-User-Session-Time'])) this._onSignatureExpired();
+  }
+
+  /**
+   * Calls onSignatureExpired for `user`, in a microtask: after the SDK has
+   * updated its state for this reply (the expired state, the stored signature).
+   * Skipped if the user changed or clearAll() / stop() ran meanwhile.
+   */
+  private _notifySignatureExpired(user: string): void {
+    const hook = this._signatureExpiredHook;
+    if (!hook) return;
+    const gen = this._lifecycleGen;
+    void Promise.resolve().then(() => {
+      if (gen !== this._lifecycleGen || this._userName !== user) return;
+      this._callHook(hook, { userName: user });
+    });
+  }
+
+  /** The current user's signature expired: warn once, tell the app, and wait for a new identify. */
   private _onSignatureExpired(): void {
     if (this._signatureExpired) return;
     this._signatureExpired = true;
@@ -1788,7 +1921,12 @@ class EncatchSDK {
     const user = this._userName;
     this._userSignature = null;
     this._userSignatureTime = null;
-    if (user) clearUserSignature(user).catch(() => {});
+    if (user) {
+      clearUserSignature(user).catch(() => {});
+      // Always told on entering the state; a new signature then rejected again isn't told twice.
+      this._expiryNotifiedFor.add(user);
+      this._notifySignatureExpired(user);
+    }
   }
 
   /** Calls a debug hook; a hook that throws or rejects can't affect the SDK. */
@@ -1818,9 +1956,9 @@ class EncatchSDK {
   }
 
   /** Keeps a submit until the next successful identify (in memory, at most 10). */
-  private _holdSubmit(params: SubmitFormRequest): void {
+  private _holdSubmit(params: SubmitFormRequest, user: string | null): void {
     this._reportSkipped('submit-form', 'signature-expired');
-    this._heldSubmits.push(params);
+    this._heldSubmits.push({ params, user });
     if (this._heldSubmits.length > MAX_HELD_SUBMITS) this._heldSubmits.shift();
     this._logger.debug('submitForm held until the next identify (secure signature expired)');
   }
@@ -1830,7 +1968,7 @@ class EncatchSDK {
     if (!this._signatureExpired && this._heldSubmits.length === 0) return;
     this._signatureExpired = false;
     const held = this._heldSubmits.splice(0);
-    for (const params of held) this.submitForm(params).catch(() => {});
+    for (const { params, user } of held) this._submitFormFor(params, user).catch(() => {});
   }
 
   /** Forgets the identifyUser() dedupe memory. */
@@ -1876,6 +2014,7 @@ class EncatchSDK {
     this._userSignature = null;
     this._userSignatureTime = null;
     this._signatureExpired = false;
+    this._expiryNotifiedFor.clear();
     if (this._heldSubmits.length > 0) {
       console.warn(`[Encatch] ${this._heldSubmits.length} held survey submit(s) dropped: the user was reset`);
       this._heldSubmits = [];
@@ -2243,16 +2382,7 @@ class EncatchSDK {
       // not JSON or parse failed, ignore
     }
 
-    // A 401 on a request that carried the stored session-time signature: it has
-    // expired (the session time is meant to cover an app session).
-    if (
-      res.status === 401 &&
-      (!opts?.identifyUserName || (opts?.storedSignature && this._userName === opts.identifyUserName)) &&
-      headers['X-User-Signature'] &&
-      headers['X-User-Session-Time']
-    ) {
-      this._onSignatureExpired();
-    }
+    if (res.status === 401) this._checkSignatureExpiry(responseText, headers, opts);
 
     if (!res.ok) {
       const err = new HttpError(endpoint, res.status, responseText, parseRetryAfter(res.headers.get('Retry-After')));

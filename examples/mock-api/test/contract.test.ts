@@ -125,10 +125,48 @@ describe('secure identify (ugw-auth/src/session.rs)', () => {
     expect((await identify({ 'X-User-Signature': sig, 'X-User-Signature-Time': ts }, DEFAULT_SECURE_SESSION_API_KEY)).status).toBe(401);
   });
 
-  it('key with a session time: rejects an expired timestamp', async () => {
+  it('key with a session time: rejects an expired timestamp, saying why', async () => {
     const ts = String(Date.now() - 20 * 60_000);
     const sig = hmacHex(`alice${ts}`, DEFAULT_SECRET);
-    expect((await identify({ 'X-User-Signature': sig, 'X-User-Session-Time': ts }, DEFAULT_SECURE_SESSION_API_KEY)).status).toBe(401);
+    expect(await identify({ 'X-User-Signature': sig, 'X-User-Session-Time': ts }, DEFAULT_SECURE_SESSION_API_KEY)).toMatchObject({
+      status: 401,
+      body: { error: 'invalid api key', reason: 'user_signature_expired' },
+    });
+  });
+
+  it('key with a session time and no secret: the time is not checked', async () => {
+    mock.update({ apiKeys: { 'mock-session-only-key': { allowedReferers: ['*'], environment: 'T', sessionTimeMinutes: 15 } } });
+    const cases: Array<Record<string, string>> = [
+      {},
+      { 'X-User-Session-Time': 'not-a-time' },
+      { 'X-User-Session-Time': String(Date.now() - 60 * 60_000) },
+    ];
+    for (const extra of cases) {
+      expect((await identify(extra, 'mock-session-only-key')).status).toBe(200);
+    }
+  });
+
+  it('key with a session time: a wrong signature gets no reason', async () => {
+    const ts = String(Date.now());
+    const res = await identify({ 'X-User-Signature': hmacHex(`bob${ts}`, DEFAULT_SECRET), 'X-User-Session-Time': ts }, DEFAULT_SECURE_SESSION_API_KEY);
+    expect(res).toMatchObject({ status: 401 });
+    expect(res.body).toEqual({ error: 'invalid api key' });
+  });
+
+  it('key with a session time: the time must be 13 digits, at most 5 minutes ahead', async () => {
+    const now = Date.now();
+    const at = (ts: string) =>
+      identify({ 'X-User-Signature': hmacHex(`alice${ts}`, DEFAULT_SECRET), 'X-User-Session-Time': ts }, DEFAULT_SECURE_SESSION_API_KEY);
+    expect((await at(String(now + 60_000))).status).toBe(200);
+    expect((await at(String(now + 10 * 60_000))).status).toBe(401);
+    expect((await at(String(Math.floor(now / 1000)))).status).toBe(401); // seconds
+    // `alice0` + T is the same signed bytes as `alice` + `0T`: rejected.
+    const t = String(now);
+    const shifted = await identify(
+      { 'X-User-Signature': hmacHex(`alice0${t}`, DEFAULT_SECRET), 'X-User-Session-Time': `0${t}` },
+      DEFAULT_SECURE_SESSION_API_KEY
+    );
+    expect(shifted.status).toBe(401);
   });
 
   it('SV8 (opt-in): checks the signature and expiry on every request for keys with a secret', async () => {
@@ -154,7 +192,10 @@ describe('secure identify (ugw-auth/src/session.rs)', () => {
       'X-User-Signature': hmacHex(`alice${ts}`, DEFAULT_SECRET),
       'X-User-Session-Time': ts,
     };
-    expect((await call('ping', {}, expired)).status).toBe(401);
+    expect(await call('ping', {}, expired)).toMatchObject({
+      status: 401,
+      body: { error: 'invalid api key', reason: 'user_signature_expired' },
+    });
   });
 
   it('only checks identify-user', async () => {

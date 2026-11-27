@@ -51,8 +51,10 @@ export function createMockApi(options: MockApiOptions = {}) {
     const key = state.scenario.apiKeys[c.req.query('apiKey') ?? ''];
     if (!userName || !key?.secret) return c.json({ error: 'userName and a secure apiKey are required' }, 400);
     // Keys with a session time sign the name plus the time; others sign the name only.
+    // `ageMinutes` signs a time that far in the past (an already-expired signature, E8).
     if ((key.sessionTimeMinutes ?? 0) > 0) {
-      const time = String(Date.now());
+      const ageMinutes = Number(c.req.query('ageMinutes') ?? 0) || 0;
+      const time = String(Date.now() - ageMinutes * 60_000);
       return c.json({ signature: hmacHex(`${userName}${time}`, key.secret), time });
     }
     return c.json({ signature: hmacHex(userName, key.secret) });

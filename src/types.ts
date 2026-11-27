@@ -59,6 +59,28 @@ export interface EncatchConfig {
    */
   onResponse?: (info: EncatchResponseInfo) => void;
   /**
+   * Called when the current user's secure identify signature has expired (older
+   * than your key's session time). Fetch a fresh signature from your server and
+   * call identifyUser() with it; check first that this user is still signed in,
+   * since the fetch takes time.
+   *
+   * - The saved signature expired (found by setUserProperties, or by any request
+   *   once the API checks signatures on every request): until an identify with a
+   *   fresh signature succeeds, events, screens, ping and automatic surveys are
+   *   skipped, and survey submits are held (in memory, up to 10) and sent after it.
+   *   setUserProperties() calls are ignored meanwhile.
+   * - The signature you just passed to identifyUser() was already expired: that
+   *   identify failed; nothing else changes. Called once per user for this until
+   *   an identify succeeds, so a signature that keeps being rejected can't cause
+   *   a loop.
+   * - A 401 that doesn't say why (an older API, or another problem such as an
+   *   inactive key) on setUserProperties() sent with a saved signature that has a
+   *   session time is also treated as an expired signature.
+   *
+   * resetUser() and clearAll() reset this. Errors thrown by the callback are ignored.
+   */
+  onSignatureExpired?: (info: SignatureExpiredInfo) => void;
+  /**
    * Keep the identified user across app restarts.
    * - true: the user name, user ID and secure signature are saved on the device
    *   and restored at the next launch, so the app doesn't need to identify again.
@@ -69,6 +91,12 @@ export interface EncatchConfig {
    * @default true
    */
   persistUserAcrossRestarts?: boolean;
+}
+
+/** Passed to EncatchConfig.onSignatureExpired. */
+export interface SignatureExpiredInfo {
+  /** The user whose signature expired: call identifyUser() for this user with a fresh signature. */
+  userName: string;
 }
 
 /** Passed to EncatchConfig.onRequest. */

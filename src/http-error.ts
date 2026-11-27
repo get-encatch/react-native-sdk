@@ -41,3 +41,14 @@ export function httpStatusOf(err: unknown): number | undefined {
   const match = msg.match(/status (\d+)/);
   return match ? parseInt(match[1], 10) : undefined;
 }
+
+/** The `reason` of a JSON error body (e.g. `{"error":"…","reason":"user_signature_expired"}`), if any. */
+export function errorReasonOf(responseText: string): string | undefined {
+  try {
+    const body: unknown = JSON.parse(responseText);
+    const reason = body && typeof body === 'object' ? (body as { reason?: unknown }).reason : undefined;
+    return typeof reason === 'string' ? reason : undefined;
+  } catch {
+    return undefined;
+  }
+}

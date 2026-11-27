@@ -2848,3 +2848,747 @@ describe('setUserProperties (1.5.0)', () => {
     expect(lines.join('\n')).toContain('setUserProperties("bob") ignored: "bob" isn\'t identified (identifyUser failed or was never called).');
   });
 });
+
+describe('onSignatureExpired (1.5.0)', () => {
+  const identifies = (server: InstalledMock) => server.of('identify-user');
+  const signedAt = (name: string, t: number) => ({
+    signature: hmacHex(`${name}${t}`, DEFAULT_SECRET),
+    generatedDateTimeinUTC: String(t),
+  });
+  const setProps = (name: string, traits: any) => (sdk.Encatch as any).setUserProperties(name, traits).catch(() => {});
+  const identify = (name: string, t: number) =>
+    sdk.Encatch.identifyUser(name, undefined, { secure: signedAt(name, t) }).catch(() => {});
+  const submit = () =>
+    sdk.Encatch.submitForm({ triggerType: 'manual', formDetails: { formConfigurationId: DEFAULT_FORM_ID, response: {} } } as any).catch(() => {});
+  /** Session key (15 min), alice identified with a fresh signature, then the ping stopped. */
+  const aliceSigned = async (config: Record<string, unknown> = {}, scenario: Record<string, unknown> = {}) => {
+    const server = installMock({ scenario });
+    await initSdk(sdk.Encatch, config, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now());
+    await settle(1_000);
+    await sdk.Encatch.stopSession();
+    return server;
+  };
+
+  it('setUserProperties with an expired stored signature: called once with the user; recovers after a fresh identify', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    await settle(16 * 60_000);
+
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(true);
+
+    // Held while expired; sent after the app identifies with a fresh signature.
+    submit();
+    await settle(1_000);
+    expect(server.of('submit-form')).toHaveLength(0);
+    identify('alice', Date.now());
+    await settle(2_000);
+    expect(server.of('submit-form').map((r) => r.status)).toEqual([200]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('identifyUser with a signature that is already expired: called; that identify failed, nothing else changes', async () => {
+    const calls: any[] = [];
+    const warn = vi.mocked(console.warn);
+    const server = installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    sdk.Encatch.trackEvent('still-tracked').catch(() => {});
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+    expect(server.of('track-event')).toHaveLength(1); // sent, not skipped (as a visitor: alice has no id yet; the mock answers 403 because visitors' new events aren't allowed by default)
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('signature has expired'))).toHaveLength(1);
+  });
+
+  it('a stale new signature for the same user keeps the valid stored one and tracking', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    const stored = (sdk.Encatch as any)._userSignature;
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    sdk.Encatch.trackEvent('after').catch(() => {});
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+    expect((sdk.Encatch as any)._userSignature).toBe(stored);
+    expect(await sdk.storage.getItem('@encatch/user_signature_alice')).toContain(stored);
+    expect(server.of('track-event').map((r) => [r.status, r.headers['X-User-Signature']])).toEqual([[200, stored]]);
+  });
+
+  it('switching to a user whose new signature is stale: called for that user; tracking goes on', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    identify('bob', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    sdk.Encatch.trackEvent('after').catch(() => {});
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => [r.body.userName, r.status])).toEqual([
+      ['alice', 200],
+      ['bob', 401],
+    ]);
+    expect(calls).toEqual([{ userName: 'bob' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+    expect(server.of('track-event')).toHaveLength(1); // sent, not skipped (as a visitor: bob has no id yet; the mock answers 403 because visitors' new events aren't allowed by default)
+  });
+
+  it('a new signature that keeps being rejected calls it once (no loop); a success resets that', async () => {
+    const calls: any[] = [];
+    const server = installMock();
+    await initSdk(
+      sdk.Encatch,
+      {
+        onSignatureExpired: (info: any) => {
+          calls.push(info);
+          identify(info.userName, Date.now() - 30 * 60_000); // the app's server clock is wrong
+        },
+      },
+      DEFAULT_SECURE_SESSION_API_KEY
+    );
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(5_000);
+    expect(identifies(server).map((r) => r.status)).toEqual([401, 401]);
+    expect(calls).toHaveLength(1);
+
+    identify('alice', Date.now());
+    await settle(1_000);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(5_000);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('the app can identify again from the callback; held submits go out after it', async () => {
+    const server = await aliceSigned({
+      // As an app would: fetch a new signature first (takes a while), then identify.
+      onSignatureExpired: ({ userName }: any) => setTimeout(() => identify(userName, Date.now()), 2_000),
+    });
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(500);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(true);
+    submit(); // held while expired
+    await settle(500);
+    expect(server.of('submit-form')).toHaveLength(0);
+    await settle(3_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401, 200]);
+    expect(server.of('submit-form').map((r) => r.status)).toEqual([200]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('a late expiry reply for a signature that has since been replaced is ignored', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) }, { latencyMs: 300 });
+    server.mock.update({
+      faults: [{ endpoint: 'track-event', count: 1, status: 401, body: { error: 'invalid api key', reason: 'user_signature_expired' } }],
+    } as any);
+    sdk.Encatch.trackEvent('slow').catch(() => {});
+    await settle(50);
+    (sdk.Encatch as any)._userSignature = 'replaced-meanwhile';
+    await settle(1_000);
+
+    expect(server.of('track-event').map((r) => r.status)).toEqual([401]);
+    expect(calls).toEqual([]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('told about a stale new signature, then the stored one expires: told again (the state is never entered silently)', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    identify('alice', Date.now() - 20 * 60_000); // rejected; the app's refresh then fails, nothing more
+    await settle(1_000);
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401, 401]);
+    expect(calls).toEqual([{ userName: 'alice' }, { userName: 'alice' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(true);
+  });
+
+  it('an identify that re-sent the stored signature and is rejected as expired enters the expired state', async () => {
+    const calls: any[] = [];
+    const server = installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    const secure = signedAt('alice', Date.now());
+    sdk.Encatch.identifyUser('alice', undefined, { secure }).catch(() => {});
+    await settle(1_000);
+    await sdk.Encatch.stopSession();
+    await settle(16 * 60_000);
+    sdk.Encatch.identifyUser('alice', { $set: { plan: 'pro' } }, { secure }).catch(() => {}); // same signature, new traits
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(true);
+    expect((sdk.Encatch as any)._userSignature).toBeNull();
+  });
+
+  it('resetUser() lets it be called again for the same user', async () => {
+    const calls: any[] = [];
+    installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    await sdk.Encatch.resetUser();
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+
+    expect(calls).toEqual([{ userName: 'alice' }, { userName: 'alice' }]);
+  });
+
+  it('clearAll() removes the callback and resets the once-only rule', async () => {
+    const first: any[] = [];
+    const second: any[] = [];
+    installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => first.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    await sdk.Encatch.clearAll();
+
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_SESSION_API_KEY); // no callback now
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+    await sdk.Encatch.clearAll();
+
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => second.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+
+    expect(first).toEqual([{ userName: 'alice' }]);
+    expect(second).toEqual([{ userName: 'alice' }]);
+  });
+
+  it('stop() between the reply and the callback: not called', async () => {
+    const calls: any[] = [];
+    installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    // stop() runs in the same tick as the reply handling, before the deferred call.
+    const original = (sdk.Encatch as any)._notifySignatureExpired.bind(sdk.Encatch);
+    (sdk.Encatch as any)._notifySignatureExpired = (user: string) => {
+      original(user);
+      sdk.Encatch.stop();
+    };
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(1_000);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('a key without a session time: a 401 without the reason on setUserProperties is not an expiry', async () => {
+    const calls: any[] = [];
+    const server = installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_API_KEY);
+    sdk.Encatch.identifyUser('alice', undefined, { secure: { signature: hmacHex('alice', DEFAULT_SECRET) } }).catch(() => {});
+    await settle(1_000);
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 401, body: { error: 'invalid api key' } }] } as any);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(calls).toEqual([]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('switching to another user drops the held submits and ends the expired state (never sent as the new user)', async () => {
+    const warn = vi.mocked(console.warn);
+    const server = await aliceSigned();
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(true);
+    submit(); // alice's answers, held
+    await settle(500);
+
+    identify('bob', Date.now());
+    await settle(2_000);
+    sdk.Encatch.trackEvent('as-bob').catch(() => {});
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => [r.body.userName, r.status])).toEqual([
+      ['alice', 200],
+      ['alice', 401],
+      ['bob', 200],
+    ]);
+    expect(server.of('submit-form')).toHaveLength(0);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+    expect(server.of('track-event').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['bob', 200]]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('held survey submit(s) dropped: identifyUser() switched'))).toHaveLength(1);
+  });
+
+  it("switching users ends alice's expired state at once: bob's submit goes out even if bob's identify fails", async () => {
+    const server = await aliceSigned();
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 400, body: { error: 'bad request' } }] } as any);
+
+    identify('bob', Date.now()); // fails
+    await settle(2_000);
+    submit();
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => [r.body.userName, r.status])).toEqual([
+      ['alice', 200],
+      ['alice', 401],
+      ['bob', 400],
+    ]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+    // As bob (bob has no id yet, so no identity headers), never with alice's.
+    expect(server.of('submit-form').map((r) => r.headers['X-User-Name'] ?? null)).toEqual([null]);
+  });
+
+  it("a submit waiting out a 429 pause is dropped if the user switched meanwhile (never sent as the new user)", async () => {
+    const warn = vi.mocked(console.warn);
+    const server = await aliceSigned();
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit(); // 429: waits for the pause, then retries
+    await settle(500);
+    identify('bob', Date.now());
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['alice', 429]]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('A survey submit was dropped'))).toHaveLength(1);
+  });
+
+  it('a visitor submit still goes out if the visitor signs in while it waits', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_SESSION_API_KEY);
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit();
+    await settle(500);
+    identify('alice', Date.now());
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => r.status)).toEqual([429, 200]);
+  });
+
+  it('back to the same user within the pause: the submit still goes out', async () => {
+    const server = await aliceSigned();
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit();
+    await settle(500);
+    identify('bob', Date.now());
+    await settle(1_000);
+    identify('alice', Date.now());
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([
+      ['alice', 429],
+      ['alice', 200],
+    ]);
+  });
+
+  it('clearAll() while a submit waits: dropped', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_SESSION_API_KEY);
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit(); // a visitor's
+    await settle(500);
+    await sdk.Encatch.clearAll();
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('bob', Date.now());
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => r.status)).toEqual([429]);
+    expect(
+      vi.mocked(console.warn).mock.calls.filter((c) => String(c[0]).includes('clearAll() ran while it was waiting'))
+    ).toHaveLength(1);
+  });
+
+  it('back to a user after a switch: onSignatureExpired can be called for them again', async () => {
+    const calls: any[] = [];
+    await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } }); // alice's stored signature expired: called
+    await settle(1_000);
+    identify('bob', Date.now());
+    await settle(1_000);
+    identify('alice', Date.now() - 20 * 60_000); // back to alice, with a stale signature: called again
+    await settle(1_000);
+
+    expect(calls).toEqual([{ userName: 'alice' }, { userName: 'alice' }]);
+  });
+
+  it('clearAll() while an expiry reply is on its way: not called', async () => {
+    const calls: any[] = [];
+    installMock({ scenario: { latencyMs: 300 } });
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000);
+    await settle(50);
+    sdk.Encatch.clearAll().catch(() => {});
+    await settle(2_000);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('called once per expiry: a fresh signature that is still rejected does not call it again; a later expiry does', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    identify('alice', Date.now() - 30 * 60_000); // the "new" signature is old too
+    await settle(1_000);
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401, 401]);
+    expect(calls).toHaveLength(1);
+
+    identify('alice', Date.now()); // succeeds: the expiry ends
+    await settle(1_000);
+    await sdk.Encatch.stopSession();
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'max' } });
+    await settle(1_000);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('older gateway (no reason): a 401 on setUserProperties with the stored signature still counts', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 401, body: { error: 'invalid api key' } }] } as any);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+  });
+
+  it('a 401 without the reason on any other request is not an expiry (inactive key, wrong referer)', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) });
+    server.mock.update({ faults: [{ endpoint: 'track-event', count: 1, status: 401, body: { error: 'invalid api key' } }] } as any);
+    sdk.Encatch.trackEvent('first').catch(() => {});
+    await settle(1_500);
+    sdk.Encatch.trackEvent('second').catch(() => {});
+    await settle(1_000);
+
+    expect(server.of('track-event').map((r) => r.status)).toEqual([401, 200]);
+    expect(calls).toEqual([]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('identifyUser rejected without the reason (wrong signature) is not an expiry', async () => {
+    const calls: any[] = [];
+    const server = installMock();
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    const t = Date.now();
+    sdk.Encatch.identifyUser('alice', undefined, { secure: { signature: 'wrong', generatedDateTimeinUTC: String(t) } }).catch(() => {});
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([401]);
+    expect(calls).toEqual([]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('the reason on a request that is not identify-user counts too (gateway checking every request)', async () => {
+    const calls: any[] = [];
+    const server = await aliceSigned({ onSignatureExpired: (info: any) => calls.push(info) }, { enforceSignatureOnAllRequests: true });
+    await settle(16 * 60_000);
+    sdk.Encatch.trackEvent('late').catch(() => {});
+    await settle(1_000);
+
+    expect(server.of('track-event').map((r) => r.status)).toEqual([401]);
+    expect(calls).toEqual([{ userName: 'alice' }]);
+  });
+
+  it('an expiry reply for a user who is no longer current is ignored', async () => {
+    const calls: any[] = [];
+    const server = installMock({ scenario: { latencyMs: 300 } });
+    await initSdk(sdk.Encatch, { onSignatureExpired: (info: any) => calls.push(info) }, DEFAULT_SECURE_SESSION_API_KEY);
+    identify('alice', Date.now() - 20 * 60_000); // will be rejected as expired...
+    await settle(50);
+    await sdk.Encatch.resetUser(); // ...but alice is gone by then
+    await settle(2_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([401]);
+    expect(calls).toEqual([]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('a callback that throws or rejects does not affect the SDK', async () => {
+    for (const hook of [
+      () => {
+        throw new Error('boom');
+      },
+      () => Promise.reject(new Error('boom')),
+    ]) {
+      const server = await aliceSigned({ onSignatureExpired: hook });
+      await settle(16 * 60_000);
+      setProps('alice', { $set: { plan: 'pro' } });
+      await settle(1_000);
+      identify('alice', Date.now());
+      await settle(1_000);
+      expect(identifies(server).map((r) => r.status)).toEqual([200, 401, 200]);
+      await sdk.Encatch.clearAll();
+    }
+  });
+
+  it('without a callback, behaves as before (warning, waits for a fresh identify)', async () => {
+    const warn = vi.mocked(console.warn);
+    const server = await aliceSigned();
+    await settle(16 * 60_000);
+    setProps('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('signature expired'))).toHaveLength(1);
+  });
+});
+
+describe('a survey submit goes only to the user it was shown to (1.5.0)', () => {
+  const identify = (name: string) => sdk.Encatch.identifyUser(name).catch(() => {});
+  const submit = () =>
+    sdk.Encatch.submitForm({ triggerType: 'manual', formDetails: { formConfigurationId: DEFAULT_FORM_ID, response: {} } } as any).catch(() => {});
+  const dropped = () => vi.mocked(console.warn).mock.calls.filter((c) => String(c[0]).includes('A survey submit was dropped'));
+  const openSurvey = async () => {
+    sdk.Encatch.showForm(DEFAULT_FORM_ID).catch(() => {});
+    await settle(2_000);
+  };
+
+  it("shown to alice, the app switches to bob while it's open: alice's submit is dropped", async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    identify('bob');
+    await settle(1_000);
+    submit();
+    await settle(1_000);
+
+    expect(server.of('show-form').map((r) => r.headers['X-User-Name'])).toEqual(['alice']);
+    expect(server.of('submit-form')).toHaveLength(0);
+    expect(dropped()).toHaveLength(1);
+  });
+
+  it('shown to alice and submitted by alice: sent as alice', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['alice', 200]]);
+  });
+
+  it('shown to alice, she signs out (resetUser) before submitting: dropped', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    await sdk.Encatch.resetUser();
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form')).toHaveLength(0);
+    expect(dropped()).toHaveLength(1);
+  });
+
+  it("alice's submit waiting out a 429 pause, she signs out meanwhile: dropped, not sent as a visitor", async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit();
+    await settle(500);
+    await sdk.Encatch.resetUser();
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['alice', 429]]);
+    expect(dropped()).toHaveLength(1);
+  });
+
+  it('shown to a visitor who signs in before submitting: sent (as before)', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await openSurvey();
+    identify('alice');
+    await settle(1_000);
+    submit();
+    await settle(1_000);
+
+    expect(server.of('show-form').map((r) => r.headers['X-User-Name'] ?? null)).toEqual([null]);
+    expect(server.of('submit-form').map((r) => r.status)).toEqual([200]);
+    expect(dropped()).toHaveLength(0);
+  });
+
+  it('stop() (provider unmount) while a submit waits: still sent, the user is the same', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit();
+    await settle(500);
+    sdk.Encatch.stop();
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([
+      ['alice', 429],
+      ['alice', 200],
+    ]);
+  });
+
+  it('after the final submit the survey is no longer tied to alice: bob can submit it later', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    submit(); // alice's final submit
+    await settle(1_000);
+    sdk.Encatch.setFormVisible(false);
+    identify('bob');
+    await settle(1_000);
+    submit(); // bob, from the app's own form (no new show)
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([
+      ['alice', 200],
+      ['bob', 200],
+    ]);
+  });
+
+  it('shown to alice, she signs out, the page sends the final submit twice: both dropped', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    await sdk.Encatch.resetUser();
+    submit();
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form')).toHaveLength(0);
+    expect(dropped()).toHaveLength(2);
+  });
+
+  it('a partial submit as alice, then a switch to bob: the later partial and final are dropped', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    const send = (partial: boolean) =>
+      sdk.Encatch.submitForm({
+        triggerType: 'manual',
+        formDetails: { formConfigurationId: DEFAULT_FORM_ID, isPartialSubmit: partial, response: {} },
+      } as any).catch(() => {});
+    send(true);
+    await settle(1_000);
+    identify('bob');
+    await settle(1_000);
+    send(true);
+    send(false);
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.body.formDetails.isPartialSubmit])).toEqual([['alice', true]]);
+    expect(dropped()).toHaveLength(2);
+  });
+
+  it('a survey closed without a dismiss (back button, CTA) is no longer tied to alice', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    sdk.Encatch.setFormVisible(false);
+    identify('bob');
+    await settle(1_000);
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['bob', 200]]);
+  });
+
+  it('after a dismiss the survey is no longer tied to alice', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    sdk.Encatch.dismissForm(DEFAULT_FORM_ID).catch(() => {});
+    await settle(1_000);
+    identify('bob');
+    await settle(1_000);
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['bob', 200]]);
+  });
+
+  it('shown to a visitor, submitted by alice who then signs out while it waits: dropped (it was alice\'s)', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await openSurvey();
+    identify('alice');
+    await settle(1_000);
+    server.mock.update({ faults: [{ endpoint: 'submit-form', count: 1, status: 429, body: { error: 'rate limit exceeded' } }] } as any);
+    submit();
+    await settle(500);
+    await sdk.Encatch.resetUser();
+    await settle(120_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['alice', 429]]);
+  });
+
+  it('a survey requested for alice that arrives after a switch to bob is not shown', async () => {
+    const server = installMock({ scenario: { latencyMs: 500 } });
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(2_000);
+    const shown = vi.fn();
+    sdk.emitter.on('showForm', shown);
+    sdk.Encatch.showForm(DEFAULT_FORM_ID).catch(() => {});
+    await settle(100); // request on its way, as alice
+    identify('bob');
+    await settle(3_000);
+
+    expect(server.of('show-form').map((r) => r.headers['X-User-Name'])).toEqual(['alice']);
+    expect(shown).not.toHaveBeenCalled();
+  });
+
+  it('a survey requested for a visitor who signs in meanwhile is still shown', async () => {
+    installMock({ scenario: { latencyMs: 500 } });
+    await initSdk(sdk.Encatch);
+    const shown = vi.fn();
+    sdk.emitter.on('showForm', shown);
+    sdk.Encatch.showForm(DEFAULT_FORM_ID).catch(() => {});
+    await settle(100);
+    identify('alice');
+    await settle(3_000);
+
+    expect(shown).toHaveBeenCalledTimes(1);
+  });
+
+  it('the same survey shown again to bob: his submit is sent as bob', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    identify('alice');
+    await settle(1_000);
+    await openSurvey();
+    sdk.Encatch.setFormVisible(false); // alice closed it
+    identify('bob');
+    await settle(1_000);
+    await openSurvey();
+    submit();
+    await settle(1_000);
+
+    expect(server.of('submit-form').map((r) => [r.headers['X-User-Name'], r.status])).toEqual([['bob', 200]]);
+  });
+});
