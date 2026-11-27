@@ -78,6 +78,11 @@ export interface EncatchContextValue {
   userName: string | null;
   /** Call Encatch.identifyUser */
   identifyUser: (userName: string, traits?: UserTraits, options?: IdentifyOptions) => void;
+  /**
+   * Call Encatch.setUserProperties: updates the identified user's properties.
+   * Never deduped; ignored unless userName is the current, identified user.
+   */
+  setUserProperties: (userName: string, traits: UserTraits) => void;
   /** Call Encatch.setLocale */
   setLocale: (locale: string) => void;
   /** Call Encatch.setCountry */
@@ -313,6 +318,10 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
     []
   );
 
+  const setUserProperties = useCallback((userName: string, traits: UserTraits) => {
+    Encatch.setUserProperties(userName, traits).catch(() => {});
+  }, []);
+
   const setLocale = useCallback((locale: string) => Encatch.setLocale(locale), []);
   const setCountry = useCallback((country: string) => Encatch.setCountry(country), []);
   const setTheme = useCallback((theme: Theme) => Encatch.setTheme(theme), []);
@@ -388,6 +397,7 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
       isIdentified,
       userName,
       identifyUser,
+      setUserProperties,
       setLocale,
       setCountry,
       setTheme,
@@ -408,6 +418,7 @@ export const EncatchProvider: React.FC<EncatchProviderProps> = ({
       isIdentified,
       userName,
       identifyUser,
+      setUserProperties,
       setLocale,
       setCountry,
       setTheme,

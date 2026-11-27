@@ -266,7 +266,7 @@ describe('EncatchProvider: stopSession across app restarts', () => {
 });
 
 describe('EncatchProvider: identity transitions', () => {
-  const FUNCTIONS = ['identifyUser', 'resetUser', 'trackEvent', 'trackScreen', 'showForm', 'dismissForm', 'submitForm', 'on', 'off'];
+  const FUNCTIONS = ['identifyUser', 'setUserProperties', 'resetUser', 'trackEvent', 'trackScreen', 'showForm', 'dismissForm', 'submitForm', 'on', 'off'];
   const functionsOf = (v: any) => FUNCTIONS.map((k) => v[k]);
 
   it('consumers do not re-render when the parent re-renders and nothing changed', async () => {
@@ -762,6 +762,19 @@ describe('clearAll(): automatic tracking stays off until startSession() or ident
 
     expect(screens(server).slice(screensBefore)).toEqual(['/checkout']);
     expect(pingActive(r)).toBe(false);
+    await r.unmount();
+  });
+});
+
+describe('useEncatch().setUserProperties (1.5.0)', () => {
+  it('updates the identified user through the hook', async () => {
+    const server = installMock({ scenario: { latencyMs: 0 } });
+    const r = await renderProvider(null);
+    await r.run(() => r.latest().identifyUser('alice'), 200);
+
+    await r.run(() => r.latest().setUserProperties('alice', { $set: { plan: 'pro' } }), 300);
+
+    expect(server.of('identify-user').map((x) => x.body.userAttributes?.$set?.plan ?? null)).toEqual([null, 'pro']);
     await r.unmount();
   });
 });

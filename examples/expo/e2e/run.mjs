@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end flows E1–E13 (1.4.4 hotfix, 1.5.0 additions), against the local mock API only.
+ * End-to-end flows E1–E14 (1.4.4 hotfix, 1.5.0 additions), against the local mock API only.
  *
  * Maestro drives the example app (release build, Mock environment); this script
  * resets the mock before each flow, sets the flow's scenario, runs the flow, then
@@ -391,6 +391,47 @@ const FLOWS = [
       }
     },
   })),
+  {
+    id: 'E14',
+    file: 'e14-identify-dedupe.yaml',
+    check(log, { expect, hooks }) {
+      const sessions = [...new Set(log.map((r) => r.headers['x-session-id']).filter(Boolean))];
+      expect(sessions.length === 2, `expected requests from exactly 2 launches, got ${sessions.length} session id(s)`);
+      expect(status(log, 401).length === 0, `${status(log, 401).length} × 401`);
+      const ids = by(log, 'identify-user');
+      expect(ids.length === 6, `expected 6 identify-user requests, got ${ids.length}`);
+      expect(ids.every((r) => r.status === 200), `identify-user statuses: ${ids.map((r) => r.status).join(',')}`);
+      const kind = (r) => {
+        const a = r.body?.userAttributes;
+        if (!a) return 'plain';
+        if (a.$set?.e2e_plan === 'pro' && a.$increment?.e2e_clicks === 1) return 'props';
+        if (a.$set?.e2e_plan === 'free') return 'free';
+        return 'other';
+      };
+      const first = ids.filter((r) => r.headers['x-session-id'] === sessions[0]);
+      const last = ids.filter((r) => r.headers['x-session-id'] === sessions[1]);
+      const user = first[0]?.body?.userName;
+      // Launch 1: sign-in, "plan free" once (its repeat skipped), both setUserProperties,
+      // then "plan free" again (setUserProperties cleared identify's traits memory).
+      const kinds = JSON.stringify(first.map(kind));
+      expect(kinds === JSON.stringify(['plain', 'free', 'props', 'props', 'free']), `launch 1 identify-user order: ${kinds}`);
+      expect(ids.every((r) => r.body?.userName === user), 'an identify-user request was for another user');
+      // setUserProperties carries the user's real id (the one later requests use).
+      const laterIds = new Set(log.filter((r) => r.endpoint !== 'identify-user' && r.headers['x-user-id']).map((r) => r.headers['x-user-id']));
+      const props = first.filter((r) => kind(r) === 'props');
+      expect(props.every((r) => laterIds.has(r.body.userId)), 'a setUserProperties body userId differs from the user id on other requests');
+      // Launch 2: the first identify of the run is sent, the second is not; still the user.
+      expect(last.length === 1 && kind(last[0]) === 'plain', `launch 2: expected 1 identify-user without traits, got ${last.length}`);
+      const afterRestart = log.filter((r) => r.headers['x-session-id'] === sessions[1] && r.endpoint !== 'identify-user');
+      expect(afterRestart.length > 0 && afterRestart.every((r) => r.headers['x-user-name'] === user && r.headers['x-user-id']), 'launch 2: a request was not sent as the user');
+      // The skipped ones really happened (taps reached the SDK): duplicate reports.
+      const dup = hooks.filter((h) => h?.hook === 'onResponse' && h.info?.endpoint === 'identify-user' && h.info?.outcome === 'skipped' && h.info?.reason === 'duplicate');
+      const restartAt = Math.min(...log.filter((r) => r.headers['x-session-id'] === sessions[1]).map((r) => r.at));
+      const dupBefore = dup.filter((h) => h.receivedAt < restartAt).length;
+      const dupAfter = dup.filter((h) => h.receivedAt >= restartAt).length;
+      expect(dupBefore === 2 && dupAfter === 1, `expected duplicate skips 2 before and 1 after the restart, got ${dupBefore} and ${dupAfter}`);
+    },
+  },
 ];
 
 // ── Device helpers ───────────────────────────────────────────────────────────
