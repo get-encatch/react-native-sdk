@@ -273,6 +273,37 @@ const FLOWS = [
     },
   })),
   {
+    // Session key, a signature that is already 20 minutes old: the gateway answers 401
+    // with reason user_signature_expired, the SDK calls onSignatureExpired once, and the
+    // example app's callback identifies again with a fresh signature.
+    id: 'E8-session-expired',
+    match: 'E8',
+    file: 'e8-secure-identify.yaml',
+    env: { API_KEY: 'mock-secure-session-api-key', SIGNATURE: 'expired' },
+    check(log, { expect, hooks }) {
+      const ids = by(log, 'identify-user');
+      expect(
+        ids.map((r) => r.status).join(',') === '401,200',
+        `identify-user statuses ${ids.map((r) => r.status).join(',')} (expected 401,200)`
+      );
+      const [first, second] = ids;
+      if (!first || !second) return;
+      const user = first.body?.userName;
+      expect(Boolean(first.headers['x-user-session-time']), 'the expired identify had no X-User-Session-Time');
+      expect(
+        second.headers['x-user-session-time'] !== first.headers['x-user-session-time'],
+        'the second identify reused the expired time'
+      );
+      const calls = hooks.filter((h) => h?.hook === 'onSignatureExpired');
+      expect(calls.length === 1, `onSignatureExpired called ${calls.length} time(s) (expected 1)`);
+      expect(calls[0]?.info?.userName === user, `onSignatureExpired got ${calls[0]?.info?.userName} (expected ${user})`);
+      const later = log.filter((r) => r.at > doneAt(second));
+      const bad = later.filter((r) => !hasIdentity(r) || !r.headers['x-user-signature'] || !r.headers['x-user-session-time']);
+      expect(later.length > 0, 'no requests after the fresh identify');
+      expect(bad.length === 0, `${bad.length} later request(s) without identity + signature headers`);
+    },
+  },
+  {
     id: 'E9',
     file: 'e9-logout-login.yaml',
     check(log, { expect, user: typedUser, user2: typedUser2 }) {

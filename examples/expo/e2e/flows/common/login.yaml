@@ -1,5 +1,5 @@
 # From the login screen: create USER, pick the SIGNATURE option (none / valid /
-# wrong) and identify. Waits for Home unless WAIT_HOME is 'false'.
+# wrong / expired) and identify. Waits for Home unless WAIT_HOME is 'false'.
 appId: com.encatch.expotester
 ---
 - scrollUntilVisible:

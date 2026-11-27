@@ -611,7 +611,7 @@ function LoginWithIdentify() {
           <View style={styles.section}>
             <Text style={[styles.label, { color: colors.text }]}>Secure mode signature (mock only)</Text>
             <View style={styles.envRow}>
-              {(['none', 'valid', 'wrong'] as const).map((kind) => (
+              {(['none', 'valid', 'wrong', 'expired'] as const).map((kind) => (
                 <Pressable
                   key={kind}
                   testID={`login-signature-${kind}`}
