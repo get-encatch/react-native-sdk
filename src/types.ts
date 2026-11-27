@@ -94,7 +94,15 @@ export interface EncatchResponseInfo {
   /** True when the API answered 429, or the call was skipped because of a 429 pause. */
   rateLimited: boolean;
   /** Why a call was skipped without being sent (only when outcome is "skipped"). */
-  reason?: 'rate-limited' | 'collapsed' | 'duplicate' | 'signature-expired' | 'visitor' | 'survey-open';
+  reason?:
+    | 'rate-limited'
+    | 'collapsed'
+    | 'duplicate'
+    | 'signature-expired'
+    | 'visitor'
+    | 'survey-open'
+    | 'not-identified'
+    | 'wrong-user';
 }
 
 // ============================================================================

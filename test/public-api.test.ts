@@ -25,7 +25,19 @@ const ALLOWED_NEW_MEMBERS = [
   'autoStartVisitorSession?: boolean;',
   // EncatchConfig option
   'persistUserAcrossRestarts?: boolean;',
+  // Encatch.setUserProperties() and the hook's setUserProperties
+  'setUserProperties(userName: string, traits: UserTraits): Promise<void>;',
+  'setUserProperties: (userName: string, traits: UserTraits) => void;',
 ];
+
+/**
+ * Lines changed in 1.5.0, new form -> published 1.4.4 form: only additions to a
+ * union (two new onResponse skip reasons).
+ */
+const ALLOWED_CHANGED_LINES: Record<string, string> = {
+  "reason?: 'rate-limited' | 'collapsed' | 'duplicate' | 'signature-expired' | 'visitor' | 'survey-open' | 'not-identified' | 'wrong-user';":
+    "reason?: 'rate-limited' | 'collapsed' | 'duplicate' | 'signature-expired' | 'visitor' | 'survey-open';",
+};
 
 function buildDeclarations(): string {
   const out = mkdtempSync(path.join(tmpdir(), 'encatch-api-'));
@@ -65,6 +77,10 @@ function withoutAllowedAdditions(dts: string): { rest: string; found: string[] }
       const allowed = ALLOWED_NEW_MEMBERS.includes(l.trim());
       if (allowed) found.push(l.trim());
       return !allowed;
+    })
+    .map((l) => {
+      const was = ALLOWED_CHANGED_LINES[l.trim()];
+      return was === undefined ? l : l.replace(l.trim(), was);
     })
     .join('\n');
   return { rest, found };

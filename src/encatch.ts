@@ -161,6 +161,19 @@ function hasUnsendableValue(value: unknown): boolean {
   return invalidDate(value);
 }
 
+/** Traits as sent: Date values in $set / $setOnce as ISO strings (matches the web SDK). */
+function toWireTraits(traits: UserTraits | undefined): UserTraits | undefined {
+  if (!traits) return undefined;
+  const convertDates = (obj: Record<string, any> | undefined): Record<string, any> | undefined => {
+    if (!obj) return undefined;
+    return Object.keys(obj).reduce<Record<string, any>>((acc, k) => {
+      acc[k] = obj[k] instanceof Date ? (obj[k] as Date).toISOString() : obj[k];
+      return acc;
+    }, {});
+  };
+  return { ...traits, $set: convertDates(traits.$set), $setOnce: convertDates(traits.$setOnce) };
+}
+
 /**
  * Traits as compared for duplicates: empty operations dropped ($set: {},
  * $unset: [], ...), $unset as a sorted copy (it's a set of names). Null when
@@ -248,6 +261,14 @@ class EncatchSDK {
    * user until the new user's identify succeeds.
    */
   private _identityConfirmed = false;
+  /**
+   * The user whose identify succeeded (or who was restored with their id at
+   * init): the only user setUserProperties() may update. Cleared by resetUser /
+   * clearAll.
+   */
+  private _confirmedName: string | null = null;
+  /** Identifies queued or retrying, by user name: setUserProperties() waits for them. */
+  private _pendingIdentifies = new Map<string, Set<Promise<void>>>();
 
   // Preferences
   private _locale: string | null = null;
@@ -414,6 +435,7 @@ class EncatchSDK {
       this._feedbackTransactions = await getFeedbackTransactions('anonymous');
     }
     this._identityConfirmed = !!(this._userName && this._userId);
+    this._confirmedName = this._identityConfirmed ? this._userName : null;
 
     this._initialized = true;
     // Survey X-close before submit, reported by the form views (once, even if init runs again).
@@ -539,20 +561,7 @@ class EncatchSDK {
     }
 
     // Convert Date objects in $set / $setOnce to ISO strings (matches web SDK)
-    const convertDates = (obj: Record<string, any> | undefined): Record<string, any> | undefined => {
-      if (!obj) return undefined;
-      return Object.keys(obj).reduce<Record<string, any>>((acc, k) => {
-        acc[k] = obj[k] instanceof Date ? (obj[k] as Date).toISOString() : obj[k];
-        return acc;
-      }, {});
-    };
-    const userAttributes: UserTraits | undefined = traits
-      ? {
-          ...traits,
-          $set: convertDates(traits.$set),
-          $setOnce: convertDates(traits.$setOnce),
-        }
-      : undefined;
+    const userAttributes = toWireTraits(traits);
 
     // Build the request
     const deviceInfo = await this._buildDeviceInfo();
@@ -570,7 +579,8 @@ class EncatchSDK {
     // repeated calls don't pile up.
     if (isPaused('tracking')) removeQueued('identifyUser');
 
-    enqueue('identifyUser', async () => {
+    const finishPending = this._addPendingIdentify(userName);
+    const sendIdentify = async (): Promise<void> => {
       const res = await this._post<IdentifyUserResponse>(ENDPOINTS.IDENTIFY_USER, req, {
         identifyUserName: userName,
         signature: options?.secure?.signature,
@@ -610,6 +620,7 @@ class EncatchSDK {
 
       // Notify listeners that the user is now fully identified (userName + userId)
       this._identityConfirmed = !!(this._userName && this._userId);
+      if (this._identityConfirmed) this._confirmedName = this._userName;
       _internalEmitter.emit('userIdentified', {
         userName: this._userName,
         userId: this._userId,
@@ -629,7 +640,13 @@ class EncatchSDK {
 
       // Survey the server picked for this user
       this._handleSurveyInReply(res);
+    };
+
+    enqueue('identifyUser', async () => {
+      await sendIdentify();
+      finishPending();
     }, undefined, () => {
+      finishPending();
       // Dropped without succeeding: allow the same identify to be sent again.
       if (this._identifyMemoryToken === memoryToken) this._clearIdentifyMemory();
       // Its traits weren't sent, even if a later identify (without traits) took over.
@@ -640,6 +657,135 @@ class EncatchSDK {
     });
 
     // Immediately flush so identify is best-effort real-time
+    flush().catch(() => {});
+  }
+
+  /** Registers an identify for `userName` as pending; the returned function ends it. */
+  private _addPendingIdentify(userName: string): () => void {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const set = this._pendingIdentifies.get(userName) ?? new Set<Promise<void>>();
+    set.add(done);
+    this._pendingIdentifies.set(userName, set);
+    return () => {
+      finish();
+      set.delete(done);
+      if (set.size === 0 && this._pendingIdentifies.get(userName) === set) this._pendingIdentifies.delete(userName);
+    };
+  }
+
+  private _isSurveyOpen(): boolean {
+    return this._loadingFormIds.size > 0 || this._isFormVisible;
+  }
+
+  /**
+   * Updates the identified user's properties (same operations as identifyUser's
+   * traits). Never deduped: every call is sent. `userName` must be the current
+   * user and their identify must have succeeded; otherwise the call is ignored,
+   * so a pending or failed switch can't update the wrong person. Waits for an
+   * identify of that user still in flight, and for an open survey to close.
+   */
+  async setUserProperties(userName: string, traits: UserTraits): Promise<void> {
+    if (!this._initialized) return;
+    if (hasUnsendableValue(traits)) {
+      this._logger.warn(
+        `setUserProperties("${userName}") ignored: traits contain a value that can't be sent (circular object, BigInt or invalid Date).`
+      );
+      return;
+    }
+    if (!traitsForDedupe(traits)) {
+      this._logger.debug('setUserProperties ignored: no traits to set.');
+      return;
+    }
+    // Identity calls made before this one run first; then wait for an identify of
+    // this user still in flight, and for an open survey to close.
+    for (;;) {
+      const pending = await this._runIdentityOp(async () => {
+        const set = this._pendingIdentifies.get(userName);
+        return set && set.size > 0 ? Promise.all([...set]) : null;
+      });
+      if (pending) {
+        await pending;
+        continue;
+      }
+      if (this._initialized && this._isSurveyOpen()) {
+        await new Promise<void>((resolve) => setTimeout(() => resolve(), 500));
+        continue;
+      }
+      break;
+    }
+    return this._runIdentityOp(async () => this._setUserPropertiesNow(userName, traits));
+  }
+
+  private async _setUserPropertiesNow(userName: string, traits: UserTraits): Promise<void> {
+    if (!this._initialized) return;
+    if (!this._userName) {
+      this._logger.debug('setUserProperties ignored: no user is identified. Call identifyUser() first.');
+      this._reportSkipped('identify-user', 'not-identified');
+      return;
+    }
+    if (this._userName !== userName) {
+      this._logger.warn(`setUserProperties("${userName}") ignored: the current user is "${this._userName}".`);
+      this._reportSkipped('identify-user', 'wrong-user');
+      return;
+    }
+    if (!this._userId || this._confirmedName !== userName) {
+      this._logger.warn(`setUserProperties("${userName}") ignored: "${userName}" isn't identified (identifyUser failed or was never called).`);
+      this._reportSkipped('identify-user', 'not-identified');
+      return;
+    }
+    if (this._signatureExpired) {
+      this._logger.debug(`setUserProperties("${userName}") ignored: secure signature expired, waiting for identify`);
+      this._reportSkipped('identify-user', 'signature-expired');
+      return;
+    }
+    if (isPaused('tracking')) {
+      this._logger.warn('setUserProperties ignored: rate limited, try again later.');
+      this._reportSkipped('identify-user', 'rate-limited');
+      return;
+    }
+
+    // A later identifyUser() with traits is sent again (properties may have changed since).
+    this._lastTraitsKey = null;
+    this._traitsMemoryToken = null;
+
+    const userId = this._userId;
+    const deviceInfo = await this._buildDeviceInfo();
+    const req: IdentifyUserRequest = {
+      userName,
+      userId,
+      $deviceInfo: deviceInfo,
+      userAttributes: toWireTraits(traits),
+      $feedbackTransactions: this._feedbackTransactions ?? undefined,
+    };
+    // Increments are sent once: a retry after a timeout could apply them twice.
+    const counts = !!(traits.$increment && Object.keys(traits.$increment).length) || !!(traits.$decrement && Object.keys(traits.$decrement).length);
+
+    enqueue(
+      'setUserProperties',
+      async () => {
+        // Checked again just before sending: a reset or switch may have happened.
+        if (this._userName !== userName || this._confirmedName !== userName || this._userId !== userId) {
+          this._logger.debug(`setUserProperties("${userName}") not sent: the user changed`);
+          return;
+        }
+        const res = await this._post<IdentifyUserResponse>(ENDPOINTS.IDENTIFY_USER, req, {
+          identifyUserName: userName,
+          signature: this._userSignature ?? undefined,
+          signatureTime: this._userSignatureTime ?? undefined,
+          storedSignature: true,
+        });
+        if (res.$feedbackTransactions) {
+          this._feedbackTransactions = res.$feedbackTransactions;
+          await setFeedbackTransactions(userName, res.$feedbackTransactions);
+        }
+        this._handleResponseMeta(res);
+        this._handleSurveyInReply(res);
+      },
+      counts ? 1 : undefined
+    );
     flush().catch(() => {});
   }
 
@@ -1460,6 +1606,7 @@ class EncatchSDK {
     this._isSessionStopped = false;
     this._isPingActive = false;
     this._identityConfirmed = false;
+    this._confirmedName = null;
     // Consent withdrawal: automatic tracking stays off after the next init() too,
     // until startSession() or a successful identify.
     this._visitorQuiet = true;
@@ -1623,7 +1770,7 @@ class EncatchSDK {
 
   /** Runs identify / reset operations one after the other, in call order. */
   private _identityChain: Promise<unknown> = Promise.resolve();
-  private _runIdentityOp(op: () => Promise<void>): Promise<void> {
+  private _runIdentityOp<T>(op: () => Promise<T>): Promise<T> {
     const run = this._identityChain.then(op, op);
     this._identityChain = run.catch(() => {});
     return run;
@@ -1677,6 +1824,7 @@ class EncatchSDK {
     await clearSessionStopped();
 
     this._identityConfirmed = false;
+    this._confirmedName = null;
     // Sign-out with autoStartVisitorSession false: the app goes quiet again (no
     // ping, no automatic screens). Otherwise the session carries on as a visitor:
     // the ping keeps running like automatic screens do (as in the web SDK), on the
@@ -1918,7 +2066,14 @@ class EncatchSDK {
   private async _post<T>(
     endpoint: string,
     body: unknown,
-    opts?: { signature?: string; signatureTime?: string; identifyUserName?: string; attempt?: number }
+    opts?: {
+      signature?: string;
+      signatureTime?: string;
+      identifyUserName?: string;
+      attempt?: number;
+      /** identify-user carrying the stored signature (setUserProperties): a 401 is an expiry. */
+      storedSignature?: boolean;
+    }
   ): Promise<T> {
     const url = `${this._apiBaseUrl}/${endpoint}`;
     const hookInfo = { endpoint: endpointName(endpoint), attempt: opts?.attempt ?? currentQueueAttempt() ?? 1 };
@@ -2014,7 +2169,12 @@ class EncatchSDK {
 
     // A 401 on a request that carried the stored session-time signature: it has
     // expired (the session time is meant to cover an app session).
-    if (res.status === 401 && !opts?.identifyUserName && headers['X-User-Signature'] && headers['X-User-Session-Time']) {
+    if (
+      res.status === 401 &&
+      (!opts?.identifyUserName || opts?.storedSignature) &&
+      headers['X-User-Signature'] &&
+      headers['X-User-Session-Time']
+    ) {
       this._onSignatureExpired();
     }
 
