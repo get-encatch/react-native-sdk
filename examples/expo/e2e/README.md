@@ -33,6 +33,7 @@ The runner stops the app on both platforms, resets the mock and sets each flow's
 | E11 | Debug hooks | `onRequest` / `onResponse` once per request; collapsed calls reported as skipped; no key in reports |
 | E12 | `autoStartVisitorSession={false}` (1.5.0): visitor, sign in, log out | No ping or automatic screen for the visitor; the app's own trackScreen still sent; sign-in sends a screen and starts pings; quiet again after logout |
 | E13 | Identify, then restart the app: `persistUserAcrossRestarts` off and default (1.5.0) | Off: back as a visitor on the login screen, no request carries the user. Default: back as the user on Home |
+| E14 | Identify dedupe and `setUserProperties` (1.5.0): sign in, identify again, set properties twice, restart, identify twice | Repeat identify not sent; both `setUserProperties` sent for the signed-in user; after the restart the first identify is sent, the second not |
 
 ## What the example adds for these flows (Mock environment only)
 

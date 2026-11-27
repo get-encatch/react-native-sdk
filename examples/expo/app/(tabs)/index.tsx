@@ -10,7 +10,7 @@ import { useTesterConfig } from '@/contexts/TesterConfigContext';
 import { splitDisplayName, useTestUsers } from '@/contexts/TestUsersContext';
 
 export default function HomeScreen() {
-  const { trackEvent, showForm, addToResponse, userName } = useEncatch();
+  const { trackEvent, showForm, addToResponse, userName, identifyUser, setUserProperties } = useEncatch();
   const { getUser } = useTestUsers();
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
@@ -123,6 +123,20 @@ export default function HomeScreen() {
         style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
         onPress={() => trackEvent('home_viewed')}>
         <Text style={styles.buttonText}>Track Event: home_viewed</Text>
+      </Pressable>
+
+      {/* 1.5.0: identify dedupe and setUserProperties (also used by E2E flow E14). */}
+      <Pressable
+        testID="home-identify-again"
+        style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && styles.buttonPressed]}
+        onPress={() => userName && identifyUser(userName)}>
+        <Text style={styles.buttonText}>Identify again (no traits)</Text>
+      </Pressable>
+      <Pressable
+        testID="home-set-properties"
+        style={({ pressed }) => [styles.button, styles.buttonSecondary, pressed && styles.buttonPressed]}
+        onPress={() => userName && setUserProperties(userName, { $set: { e2e_plan: 'pro' }, $increment: { e2e_clicks: 1 } })}>
+        <Text style={styles.buttonText}>Set properties (plan pro, clicks +1)</Text>
       </Pressable>
     </ScrollView>
   );

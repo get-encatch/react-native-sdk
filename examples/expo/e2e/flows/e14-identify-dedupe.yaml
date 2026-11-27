@@ -1,0 +1,39 @@
+# E14 (1.5.0): identifyUser dedupe and setUserProperties.
+# Launch 1: sign in (identify with traits) → "Identify again" (duplicate, not sent)
+#   → "Set properties" twice (never deduped, both sent).
+# Restart (user kept) → "Identify again" (first of the run, sent) → again (not sent).
+appId: com.encatch.expotester
+---
+- runFlow: common/setup.yaml
+- runFlow: common/login.yaml
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- scrollUntilVisible:
+    element:
+      id: home-identify-again
+    direction: DOWN
+- tapOn:
+    id: home-identify-again
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn:
+    id: home-set-properties
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn:
+    id: home-set-properties
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }
+- stopApp
+- launchApp:
+    clearState: false
+- extendedWaitUntil:
+    visible:
+      id: home-track-event
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: home-identify-again
+    direction: DOWN
+- tapOn:
+    id: home-identify-again
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 2 } }
+- tapOn:
+    id: home-identify-again
+- runFlow: { file: common/pause.yaml, env: { SECONDS: 3 } }

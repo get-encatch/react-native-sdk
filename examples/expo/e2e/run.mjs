@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end flows E1–E13 (1.4.4 hotfix, 1.5.0 additions), against the local mock API only.
+ * End-to-end flows E1–E14 (1.4.4 hotfix, 1.5.0 additions), against the local mock API only.
  *
  * Maestro drives the example app (release build, Mock environment); this script
  * resets the mock before each flow, sets the flow's scenario, runs the flow, then
@@ -391,6 +391,29 @@ const FLOWS = [
       }
     },
   })),
+  {
+    id: 'E14',
+    file: 'e14-identify-dedupe.yaml',
+    check(log, { expect }) {
+      const sessions = [...new Set(log.map((r) => r.headers['x-session-id']).filter(Boolean))];
+      expect(sessions.length >= 2, `expected requests from 2 launches, got ${sessions.length} session id(s)`);
+      const ids = by(log, 'identify-user');
+      expect(ids.every((r) => r.status === 200), `identify-user statuses: ${ids.map((r) => r.status).join(',')}`);
+      const isProps = (r) => r.body?.userAttributes?.$set?.e2e_plan === 'pro' && r.body?.userAttributes?.$increment?.e2e_clicks === 1;
+      const first = ids.filter((r) => r.headers['x-session-id'] === sessions[0]);
+      const last = ids.filter((r) => r.headers['x-session-id'] === sessions.at(-1));
+      const props = first.filter(isProps);
+      const plainFirst = first.filter((r) => !isProps(r));
+      // Launch 1: the sign-in identify; "Identify again" skipped; both setUserProperties sent.
+      expect(plainFirst.length === 1, `launch 1: expected 1 identify besides setUserProperties, got ${plainFirst.length}`);
+      expect(props.length === 2, `launch 1: expected 2 setUserProperties requests (never deduped), got ${props.length}`);
+      const user = plainFirst[0]?.body?.userName;
+      expect(props.every((r) => r.body.userName === user && Boolean(r.body.userId) && r.headers['x-user-name'] === user), 'a setUserProperties request was not for the signed-in user');
+      // Launch 2: the first identify of the run is sent, the second is not.
+      expect(last.length === 1, `launch 2: expected 1 identify-user (first of the run), got ${last.length}`);
+      expect(last.every((r) => !r.body?.userAttributes), 'launch 2: the identify carried traits');
+    },
+  },
 ];
 
 // ── Device helpers ───────────────────────────────────────────────────────────
