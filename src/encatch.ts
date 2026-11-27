@@ -546,6 +546,8 @@ class EncatchSDK {
       const storedId = await getUserId(userName);
       this._userName = userName;
       this._userId = storedId;
+      // Not confirmed until this user's identify succeeds (setUserProperties waits for it).
+      this._confirmedName = null;
       await this._loadStoredSignature(userName);
     }
     await setUserName(userName);
@@ -620,7 +622,7 @@ class EncatchSDK {
 
       // Notify listeners that the user is now fully identified (userName + userId)
       this._identityConfirmed = !!(this._userName && this._userId);
-      if (this._identityConfirmed) this._confirmedName = this._userName;
+      if (this._identityConfirmed && this._userName === userName) this._confirmedName = userName;
       _internalEmitter.emit('userIdentified', {
         userName: this._userName,
         userId: this._userId,
@@ -676,8 +678,46 @@ class EncatchSDK {
     };
   }
 
+  /** A survey is loading, on screen, or about to be shown (pending automatic show). */
   private _isSurveyOpen(): boolean {
-    return this._loadingFormIds.size > 0 || this._isFormVisible;
+    return this._loadingFormIds.size > 0 || this._isFormVisible || this._pendingAutoShow !== null;
+  }
+
+  // Waiting for an open survey to close: one shared check every 500 ms, also run
+  // when a survey closes. stop() / clearAll() release every waiter.
+  private _surveyIdleWaiters: Array<() => void> = [];
+  private _surveyIdleTimer: ReturnType<typeof setInterval> | null = null;
+  /** Bumped by stop() / clearAll(): waits started before then give up. */
+  private _lifecycleGen = 0;
+
+  private _waitForSurveyIdle(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this._surveyIdleWaiters.push(resolve);
+      if (!this._surveyIdleTimer) this._surveyIdleTimer = setInterval(() => this._checkSurveyIdle(), 500);
+    });
+  }
+
+  private _checkSurveyIdle(release = false): void {
+    if (!release && this._initialized && this._isSurveyOpen()) return;
+    if (this._surveyIdleTimer) clearInterval(this._surveyIdleTimer);
+    this._surveyIdleTimer = null;
+    const waiters = this._surveyIdleWaiters;
+    this._surveyIdleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  // setUserProperties requests go out one after the other, in call order: the
+  // next is queued only when the previous one is sent or dropped, so a retried
+  // older update can't land after a newer one.
+  private _userPropsWaiting: Array<() => void> = [];
+  private _userPropsBusy = false;
+
+  private _pumpUserProps(): void {
+    if (this._userPropsBusy) return;
+    const next = this._userPropsWaiting.shift();
+    if (!next) return;
+    this._userPropsBusy = true;
+    next();
   }
 
   /**
@@ -686,6 +726,7 @@ class EncatchSDK {
    * user and their identify must have succeeded; otherwise the call is ignored,
    * so a pending or failed switch can't update the wrong person. Waits for an
    * identify of that user still in flight, and for an open survey to close.
+   * Resolves once the update is queued or ignored.
    */
   async setUserProperties(userName: string, traits: UserTraits): Promise<void> {
     if (!this._initialized) return;
@@ -699,27 +740,33 @@ class EncatchSDK {
       this._logger.debug('setUserProperties ignored: no traits to set.');
       return;
     }
-    // Identity calls made before this one run first; then wait for an identify of
-    // this user still in flight, and for an open survey to close.
+    // A copy of what will be sent, taken now: the caller may change the object meanwhile.
+    const wire = JSON.parse(JSON.stringify(toWireTraits(traits))) as UserTraits;
+    const counts =
+      !!(wire.$increment && Object.keys(wire.$increment).length) || !!(wire.$decrement && Object.keys(wire.$decrement).length);
+
+    // Identity calls made before this one run first; then wait (outside the
+    // identity chain, so a resetUser() isn't held up) for an identify of this
+    // user still in flight, and for an open survey to close.
+    const gen = this._lifecycleGen;
     for (;;) {
       const pending = await this._runIdentityOp(async () => {
         const set = this._pendingIdentifies.get(userName);
-        return set && set.size > 0 ? Promise.all([...set]) : null;
+        return set && set.size > 0 ? { wait: [...set] } : null;
       });
       if (pending) {
-        await pending;
-        continue;
+        await Promise.all(pending.wait);
+      } else if (this._initialized && this._isSurveyOpen()) {
+        await this._waitForSurveyIdle();
+      } else {
+        break;
       }
-      if (this._initialized && this._isSurveyOpen()) {
-        await new Promise<void>((resolve) => setTimeout(() => resolve(), 500));
-        continue;
-      }
-      break;
+      if (gen !== this._lifecycleGen || !this._initialized) return;
     }
-    return this._runIdentityOp(async () => this._setUserPropertiesNow(userName, traits));
+    return this._runIdentityOp(async () => this._setUserPropertiesNow(userName, wire, counts));
   }
 
-  private async _setUserPropertiesNow(userName: string, traits: UserTraits): Promise<void> {
+  private async _setUserPropertiesNow(userName: string, wire: UserTraits, counts: boolean): Promise<void> {
     if (!this._initialized) return;
     if (!this._userName) {
       this._logger.debug('setUserProperties ignored: no user is identified. Call identifyUser() first.');
@@ -752,41 +799,62 @@ class EncatchSDK {
     this._traitsMemoryToken = null;
 
     const userId = this._userId;
+    const gen = this._lifecycleGen;
     const deviceInfo = await this._buildDeviceInfo();
     const req: IdentifyUserRequest = {
       userName,
       userId,
       $deviceInfo: deviceInfo,
-      userAttributes: toWireTraits(traits),
+      userAttributes: wire,
       $feedbackTransactions: this._feedbackTransactions ?? undefined,
     };
-    // Increments are sent once: a retry after a timeout could apply them twice.
-    const counts = !!(traits.$increment && Object.keys(traits.$increment).length) || !!(traits.$decrement && Object.keys(traits.$decrement).length);
 
-    enqueue(
-      'setUserProperties',
-      async () => {
-        // Checked again just before sending: a reset or switch may have happened.
-        if (this._userName !== userName || this._confirmedName !== userName || this._userId !== userId) {
-          this._logger.debug(`setUserProperties("${userName}") not sent: the user changed`);
-          return;
-        }
-        const res = await this._post<IdentifyUserResponse>(ENDPOINTS.IDENTIFY_USER, req, {
-          identifyUserName: userName,
-          signature: this._userSignature ?? undefined,
-          signatureTime: this._userSignatureTime ?? undefined,
-          storedSignature: true,
-        });
-        if (res.$feedbackTransactions) {
-          this._feedbackTransactions = res.$feedbackTransactions;
-          await setFeedbackTransactions(userName, res.$feedbackTransactions);
-        }
-        this._handleResponseMeta(res);
-        this._handleSurveyInReply(res);
-      },
-      counts ? 1 : undefined
-    );
-    flush().catch(() => {});
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      this._userPropsBusy = false;
+      this._pumpUserProps();
+    };
+    const send = async (): Promise<void> => {
+      // Checked again just before sending: a reset or switch may have happened.
+      if (gen !== this._lifecycleGen || this._userName !== userName || this._confirmedName !== userName || this._userId !== userId) {
+        this._logger.debug(`setUserProperties("${userName}") not sent: the user changed`);
+        return finish();
+      }
+      if (this._signatureExpired) {
+        this._reportSkipped('identify-user', 'signature-expired');
+        return finish();
+      }
+      // A survey opened meanwhile: send after it closes (an identify-user during
+      // an open survey can drop it on the server).
+      if (this._isSurveyOpen()) {
+        void this._waitForSurveyIdle().then(() => (gen === this._lifecycleGen ? queueIt() : finish()));
+        return;
+      }
+      const res = await this._post<IdentifyUserResponse>(ENDPOINTS.IDENTIFY_USER, req, {
+        identifyUserName: userName,
+        signature: this._userSignature ?? undefined,
+        signatureTime: this._userSignatureTime ?? undefined,
+        storedSignature: true,
+      });
+      // A reply for a user who is no longer current (reset or switched since): ignore it.
+      if (this._userName !== userName) return finish();
+      if (res.$feedbackTransactions) {
+        this._feedbackTransactions = res.$feedbackTransactions;
+        await setFeedbackTransactions(userName, res.$feedbackTransactions);
+      }
+      this._handleResponseMeta(res);
+      this._handleSurveyInReply(res);
+      finish();
+    };
+    // Increments are sent once: a retry after a timeout could apply them twice.
+    const queueIt = () => {
+      enqueue('setUserProperties', send, counts ? 1 : undefined, finish);
+      flush().catch(() => {});
+    };
+    this._userPropsWaiting.push(queueIt);
+    this._pumpUserProps();
   }
 
   // ============================================================================
@@ -1124,6 +1192,7 @@ class EncatchSDK {
   private _markFormClosed(): void {
     this._isFormVisible = false;
     this._openFormIds = [];
+    if (this._surveyIdleWaiters.length > 0) this._checkSurveyIdle();
   }
 
   private _cancelPendingAutoShow(): void {
@@ -1569,6 +1638,13 @@ class EncatchSDK {
     _internalEmitter.emit('dismissForm', {});
     this._markFormClosed();
     this._cancelPendingAutoShow();
+
+    // Release anything waiting for a survey to close, and drop waiting
+    // setUserProperties updates (they were for the user being cleared).
+    this._lifecycleGen += 1;
+    this._checkSurveyIdle(true);
+    this._userPropsWaiting = [];
+    this._userPropsBusy = false;
 
     // Wipe every @encatch/ key from AsyncStorage in a single batch (and the
     // in-memory user data used with persistUserAcrossRestarts false)
@@ -2171,7 +2247,7 @@ class EncatchSDK {
     // expired (the session time is meant to cover an app session).
     if (
       res.status === 401 &&
-      (!opts?.identifyUserName || opts?.storedSignature) &&
+      (!opts?.identifyUserName || (opts?.storedSignature && this._userName === opts.identifyUserName)) &&
       headers['X-User-Signature'] &&
       headers['X-User-Session-Time']
     ) {
@@ -2259,6 +2335,8 @@ class EncatchSDK {
   stop(): void {
     this._stopPingInterval();
     stopAppStateListener();
+    this._lifecycleGen += 1;
+    this._checkSurveyIdle(true);
   }
 }
 

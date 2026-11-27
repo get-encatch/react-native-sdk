@@ -2481,17 +2481,20 @@ describe('setUserProperties (1.5.0)', () => {
     ]);
   });
 
-  it('resetUser() while it is queued: not sent', async () => {
+  it('resetUser() while it is queued: not sent (the re-check just before sending)', async () => {
     const server = installMock({ scenario: { latencyMs: 300 } });
-    await initSdk(sdk.Encatch);
+    const reports = await withReports();
     await identified(server);
-    sdk.Encatch.trackEvent('busy').catch(() => {}); // something ahead in the queue
+    sdk.Encatch.trackEvent('busy').catch(() => {}); // a slow request ahead in the queue
+    await settle(10);
 
-    setProps('alice', { $set: { plan: 'pro' } });
-    sdk.Encatch.resetUser().catch(() => {});
+    await (sdk.Encatch as any).setUserProperties('alice', { $set: { plan: 'pro' } }); // queued
+    expect(sdk.queue.queueSize()).toBeGreaterThanOrEqual(1);
+    await sdk.Encatch.resetUser();
     await settle(3_000);
 
     expect(identifies(server)).toHaveLength(1);
+    expect(skipped(reports, 'not-identified')).toHaveLength(0); // it got past the first check
   });
 
   it("doesn't restart a stopped session, release held submits or change isIdentified", async () => {
@@ -2624,6 +2627,199 @@ describe('setUserProperties (1.5.0)', () => {
     expect(identifies(server)).toHaveLength(1);
   });
 
+  it("while it waits for a held identify, resetUser() isn't held up", async () => {
+    const server = installMock({ scenario: { faults: [{ endpoint: 'track-event', count: 1, status: 429 }] } });
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.trackEvent('x').catch(() => {}); // 429: tracking paused
+    await settle(1_000);
+    sdk.Encatch.identifyUser('alice', { $set: { plan: 'held' } }).catch(() => {}); // held
+    setProps('alice', { $set: { plan: 'after' } }); // waits for it
+    await settle(100);
+
+    let done = false;
+    sdk.Encatch.resetUser().then(() => {
+      done = true;
+    });
+    await settle(1_000);
+
+    expect(done).toBe(true);
+  });
+
+  it('the "hold only the latest identify" rule still applies while one waits', async () => {
+    const server = installMock({ scenario: { faults: [{ endpoint: 'track-event', count: 1, status: 429 }] } });
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.trackEvent('x').catch(() => {});
+    await settle(1_000);
+
+    sdk.Encatch.identifyUser('alice', { $set: { plan: 'held1' } }).catch(() => {});
+    setProps('alice', { $set: { plan: 'props' } });
+    await settle(100);
+    sdk.Encatch.identifyUser('alice', { $set: { plan: 'held2' } }).catch(() => {});
+    await settle(70_000);
+
+    expect(identifies(server).map((r) => r.body.userAttributes?.$set?.plan ?? null)).toEqual([null, 'held2', 'props']);
+  });
+
+  it('updates go out in call order: a retried older update never lands after a newer one', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 500 }] } as any);
+
+    setProps('alice', { $set: { plan: 'old' } });
+    setProps('alice', { $set: { plan: 'new' } });
+    await settle(10_000);
+
+    expect(identifies(server).map((r) => [r.status, r.body.userAttributes?.$set?.plan ?? null])).toEqual([
+      [200, null],
+      [500, 'old'],
+      [200, 'old'],
+      [200, 'new'],
+    ]);
+  });
+
+  it("A, B pending, back to A whose identify fails: A's update is ignored", async () => {
+    const server = installMock();
+    const reports = await withReports();
+    await identified(server);
+    server.mock.update({
+      faults: [
+        { endpoint: 'identify-user', count: 1, match: { userName: 'bob' }, delayMs: 2_000 },
+        { endpoint: 'identify-user', count: 1, match: { userName: 'alice' }, status: 400 },
+      ],
+    } as any);
+
+    sdk.Encatch.identifyUser('bob').catch(() => {});
+    await settle(100);
+    sdk.Encatch.identifyUser('alice').catch(() => {});
+    setProps('alice', { $set: { plan: 'x' } });
+    await settle(10_000);
+
+    expect(identifies(server).filter((r) => r.body.userAttributes)).toHaveLength(0);
+    expect(skipped(reports, 'not-identified')).toHaveLength(1);
+  });
+
+  it('a survey picked with a delay is waited for: no update while it is pending or open', async () => {
+    const server = installMock({
+      scenario: { burstDropsOpenForm: true, triggers: { identify: { formId: DEFAULT_FORM_ID, onPageDelay: 1 }, events: {}, screens: {} } },
+    });
+    await initSdk(sdk.Encatch);
+    sdk.Encatch.identifyUser('bob').catch(() => {});
+    await settle(200);
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 500 }] } as any);
+    setProps('bob', { $set: { plan: 'x' } });
+    await settle(8_000);
+
+    expect([...server.mock.state.dropped]).toEqual([]);
+  });
+
+  it('a reply that arrives after resetUser() is ignored (no survey or transactions for the visitor)', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    server.mock.update({
+      faults: [{ endpoint: 'identify-user', count: 1, delayMs: 500, status: 200, body: { message: 'ok', nextFeedbackId: DEFAULT_FORM_ID, onPageDelay: 0, $feedbackTransactions: 'ALICE-TX' } }],
+    } as any);
+
+    await (sdk.Encatch as any).setUserProperties('alice', { $set: { plan: 'x' } });
+    await settle(100);
+    await sdk.Encatch.resetUser();
+    await settle(3_000);
+
+    expect(server.of('show-form')).toHaveLength(0);
+    expect((sdk.Encatch as any)._feedbackTransactions).not.toBe('ALICE-TX');
+  });
+
+  it("a 401 for the old user arriving after resetUser() doesn't mark the visitor's signature expired", async () => {
+    const server = installMock({ scenario: { enforceSignatureOnAllRequests: true, latencyMs: 300 } });
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_SESSION_API_KEY);
+    const t = String(Date.now());
+    sdk.Encatch.identifyUser('alice', undefined, { secure: { signature: hmacHex(`alice${t}`, DEFAULT_SECRET), generatedDateTimeinUTC: t } }).catch(() => {});
+    await settle(1_000);
+    await sdk.Encatch.stopSession();
+    await settle(16 * 60_000);
+
+    await (sdk.Encatch as any).setUserProperties('alice', { $set: { plan: 'x' } });
+    await settle(100);
+    await sdk.Encatch.resetUser();
+    await settle(2_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 401]);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('clearAll() while one waits for a survey: nothing is sent afterwards', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.setFormVisible(true);
+    setProps('alice', { $set: { plan: 'x' } });
+    await settle(1_000);
+
+    await sdk.Encatch.clearAll();
+    await initSdk(sdk.Encatch);
+    await settle(5_000);
+
+    expect(identifies(server)).toHaveLength(1);
+  });
+
+  it('what is sent is a copy taken at the call: later changes to the object are not sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    sdk.Encatch.setFormVisible(true); // make it wait
+    const traits: any = { $set: { plan: 'pro' } };
+    setProps('alice', traits);
+    traits.$set.plan = 'changed';
+    traits.$increment = { n: 1 };
+    sdk.Encatch.setFormVisible(false);
+    await settle(2_000);
+
+    expect(identifies(server)[1].body.userAttributes).toEqual({ $set: { plan: 'pro' } });
+  });
+
+  it('$decrement is not retried either', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 500 }] } as any);
+    setProps('alice', { $decrement: { credits: 1 } });
+    await settle(10_000);
+    expect(identifies(server).map((r) => r.status)).toEqual([200, 500]);
+  });
+
+  it("doesn't emit userIdentified", async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    const seen: unknown[] = [];
+    sdk.emitter.on('userIdentified', (p: unknown) => seen.push(p));
+    setProps('alice', { $set: { plan: 'x' } });
+    await settle(1_000);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('warnings show without debugMode; debug messages do not', async () => {
+    const lines: string[] = [];
+    for (const m of ['log', 'info', 'debug', 'warn'] as const) {
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+    }
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    setProps('alice', { $set: { a: 1 } }); // visitor: debug only
+    await settle(500);
+    await identified(server);
+    setProps('bob', { $set: { a: 1 } }); // wrong user: warning
+    await settle(500);
+    const log = lines.join('\n');
+    expect(log).toContain('setUserProperties("bob") ignored: the current user is "alice".');
+    expect(log).not.toContain('no user is identified');
+  });
+
   it('logging: the ignore messages appear (warnings always; the rest with debugMode)', async () => {
     const lines: string[] = [];
     for (const m of ['log', 'info', 'debug', 'warn'] as const) {
@@ -2644,5 +2840,11 @@ describe('setUserProperties (1.5.0)', () => {
     expect(log).toContain('setUserProperties ignored: no user is identified. Call identifyUser() first.');
     expect(log).toContain('setUserProperties("bob") ignored: the current user is "alice".');
     expect(log).toContain('setUserProperties ignored: no traits to set.');
+    sdk.Encatch.identifyUser('bob').catch(() => {}); // pending: setUserProperties for alice is now the wrong user
+    server.mock.update({ faults: [{ endpoint: 'identify-user', count: 1, status: 400 }] } as any);
+    await settle(1_000);
+    setProps('bob', { $set: { a: 1 } }); // bob's identify failed
+    await settle(500);
+    expect(lines.join('\n')).toContain('setUserProperties("bob") ignored: "bob" isn\'t identified (identifyUser failed or was never called).');
   });
 });

@@ -94,6 +94,9 @@ describe('public API', () => {
     expect(rest).toBe(published);
     // Each addition is really there (the list doesn't hide a removed member).
     expect([...new Set(found)].sort()).toEqual([...ALLOWED_NEW_MEMBERS].sort());
+    // Each changed line is really there in its new form.
+    const builtLines = normalise(built).split('\n').map((l) => l.trim());
+    for (const line of Object.keys(ALLOWED_CHANGED_LINES)) expect(builtLines).toContain(line);
   }, 60_000);
 });
 
