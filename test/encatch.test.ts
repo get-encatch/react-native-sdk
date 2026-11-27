@@ -1967,3 +1967,272 @@ describe('persistUserAcrossRestarts: false', () => {
     expect(sdk.Encatch.isIdentified()).toBe(true);
   });
 });
+
+// ============================================================================
+// 1.5.0: identifyUser() dedupe, PostHog-style (docs/1.5.0-IDENTIFY-DEDUPE-PLAN.md).
+// Memory for this app run only: the user identified, the last traits and the
+// last options (signature) sent or in flight.
+// ============================================================================
+
+describe('identifyUser dedupe (1.5.0)', () => {
+  const identifies = (server: InstalledMock) => server.of('identify-user');
+  const call = (name: string, traits?: any, options?: any) => sdk.Encatch.identifyUser(name, traits, options).catch(() => {});
+
+  it('first identify of an app run for a restored user with no traits is sent; a second is not', async () => {
+    const server = installMock();
+    await sdk.storage.setItem('@encatch/user_name', 'alice');
+    await sdk.storage.setItem('@encatch/user_id_alice', server.userId('alice'));
+    await initSdk(sdk.Encatch);
+    expect(identifies(server)).toHaveLength(0); // restoring sends nothing
+
+    call('alice');
+    await settle(1_000);
+    call('alice');
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+  });
+
+  it('same user, no traits after an identify with traits: not sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    call('alice');
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+  });
+
+  it('same traits again: not sent, whatever the key order or $unset order; the caller\'s $unset array is left alone', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    const unset = ['b', 'a'];
+    call('alice', { $set: { plan: 'pro', seats: 3 }, $unset: ['a', 'b'] });
+    await settle(1_000);
+
+    call('alice', { $unset: unset, $set: { seats: 3, plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+    expect(unset).toEqual(['b', 'a']);
+  });
+
+  it('empty operations count as no traits', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    call('alice', { $set: {}, $unset: [] });
+    call('alice', {});
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+  });
+
+  it('different traits: sent; A, B, A: all three sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    for (const plan of ['a', 'b', 'a']) {
+      call('alice', { $set: { plan } });
+      await settle(1_000);
+    }
+
+    expect(identifies(server)).toHaveLength(3);
+  });
+
+  it('a different user is sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    call('bob', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.body.userName)).toEqual(['alice', 'bob']);
+  });
+
+  it('burst during a switch: 20 identical calls for the new user send one', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice');
+    await settle(1_000);
+
+    for (let i = 0; i < 20; i++) call('bob', { $set: { plan: 'pro' } });
+    await settle(5_000);
+
+    expect(identifies(server).map((r) => r.body.userName)).toEqual(['alice', 'bob']);
+  });
+
+  it('the same $increment twice: the second is not sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $increment: { logins: 1 } });
+    await settle(1_000);
+
+    call('alice', { $increment: { logins: 1 } });
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+  });
+
+  it('a fresh signature is sent; the same one repeated while in flight is not; omitting secure afterwards is sent', async () => {
+    const server = installMock({ scenario: { latencyMs: 500 } });
+    await initSdk(sdk.Encatch, {}, DEFAULT_SECURE_API_KEY);
+    const signature = hmacHex('alice', DEFAULT_SECRET);
+
+    call('alice', undefined, { secure: { signature } });
+    call('alice', undefined, { secure: { signature } }); // in flight: duplicate
+    await settle(2_000);
+    expect(identifies(server)).toHaveLength(1);
+
+    call('alice', undefined, { secure: { signature: hmacHex('alice', 'other-secret') } }); // a different signature
+    await settle(2_000);
+    expect(identifies(server)).toHaveLength(2);
+
+    call('alice'); // secure omitted: clears the signature, so it must go out
+    await settle(2_000);
+    expect(identifies(server)).toHaveLength(3);
+  });
+
+  it('locale given equal to the current one: not sent; a different one: sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    sdk.Encatch.setLocale('fr');
+    call('alice', undefined, { locale: 'fr' });
+    await settle(1_000);
+
+    call('alice', undefined, { locale: 'fr' });
+    await settle(1_000);
+    expect(identifies(server)).toHaveLength(1);
+
+    call('alice', undefined, { country: 'DE' });
+    await settle(1_000);
+    expect(identifies(server)).toHaveLength(2);
+  });
+
+  it('while the secure signature is expired, a repeat identify is sent', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    await identified(server);
+    (sdk.Encatch as any)._signatureExpired = true;
+
+    call('alice');
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(2);
+    expect((sdk.Encatch as any)._signatureExpired).toBe(false);
+  });
+
+  it('after stopSession(), a repeat identify is sent and turns the session back on', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    await sdk.Encatch.stopSession();
+
+    call('alice');
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(2);
+    expect(await sdk.storage.getItem('@encatch/session_stopped')).toBeNull();
+  });
+
+  it('a failed identify can be sent again', async () => {
+    const server = installMock({ scenario: { faults: [{ endpoint: 'identify-user', count: 1, status: 400 }] } });
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([400, 200]);
+  });
+
+  it('a 429-dropped identify can be sent again (after the pause)', async () => {
+    const server = installMock({ scenario: { faults: [{ endpoint: 'identify-user', count: 1, status: 429 }] } });
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(65_000);
+
+    expect(identifies(server).map((r) => r.status)).toEqual([429, 200]);
+  });
+
+  it('memory is cleared by resetUser() and clearAll()', async () => {
+    const server = installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    await sdk.Encatch.resetUser();
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    expect(identifies(server)).toHaveLength(2);
+
+    await sdk.Encatch.clearAll();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    expect(identifies(server)).toHaveLength(3);
+  });
+
+  it('traits that can\'t be sent (circular, BigInt, invalid Date): no request, no throw, a warning', async () => {
+    const server = installMock();
+    const lines: string[] = [];
+    for (const m of ['log', 'info', 'debug', 'warn', 'error'] as const) {
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+    }
+    await initSdk(sdk.Encatch);
+    const circular: any = { a: 1 };
+    circular.self = circular;
+
+    await expect(sdk.Encatch.identifyUser('alice', { $set: circular })).resolves.toBeUndefined();
+    await expect(sdk.Encatch.identifyUser('alice', { $set: { big: BigInt(1) as any } })).resolves.toBeUndefined();
+    await expect(sdk.Encatch.identifyUser('alice', { $set: { at: new Date('nope') } })).resolves.toBeUndefined();
+    await settle(2_000);
+
+    expect(identifies(server)).toHaveLength(0);
+    expect(lines.filter((l) => l.includes("can't be sent"))).toHaveLength(3);
+  });
+
+  it('logging: with debugMode a skipped duplicate names setUserProperties; without it nothing is logged; onResponse reports duplicate', async () => {
+    const lines: string[] = [];
+    for (const m of ['log', 'info', 'debug'] as const) {
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+    }
+    const reports: any[] = [];
+    const server = installMock();
+    await initSdk(sdk.Encatch, { debugMode: true, onResponse: (i: any) => reports.push(i) });
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+
+    expect(identifies(server)).toHaveLength(1);
+    expect(lines.join('\n')).toContain('use setUserProperties("alice", traits)');
+    expect(reports.some((r) => r.endpoint === 'identify-user' && r.outcome === 'skipped' && r.reason === 'duplicate')).toBe(true);
+
+    // debugMode off: nothing logged for a skip.
+    sdk.Encatch.stop();
+    sdk = await loadSdk();
+    lines.length = 0;
+    installMock();
+    await initSdk(sdk.Encatch);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    call('alice', { $set: { plan: 'pro' } });
+    await settle(1_000);
+    expect(lines.join('\n')).not.toContain('skipped');
+  });
+});

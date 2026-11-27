@@ -135,6 +135,45 @@ function stableKey(value: unknown): string {
   return JSON.stringify(norm(value)) ?? '';
 }
 
+/**
+ * True when the value holds something a request body can't carry: a circular
+ * reference, a BigInt or an invalid Date (JSON.stringify would throw).
+ */
+function hasUnsendableValue(value: unknown, seen: Set<object> = new Set()): boolean {
+  if (typeof value === 'bigint') return true;
+  if (value instanceof Date) return Number.isNaN(value.getTime());
+  if (value && typeof value === 'object') {
+    if (seen.has(value)) return true;
+    seen.add(value);
+    const children = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+    const bad = children.some((v) => hasUnsendableValue(v, seen));
+    seen.delete(value);
+    return bad;
+  }
+  return false;
+}
+
+/**
+ * Traits as compared for duplicates: empty operations dropped ($set: {},
+ * $unset: [], ...), $unset as a sorted copy (it's a set of names). Null when
+ * nothing is left. The caller's object is never changed.
+ */
+function traitsForDedupe(traits?: UserTraits): Record<string, unknown> | null {
+  if (!traits) return null;
+  const out: Record<string, unknown> = {};
+  for (const [op, v] of Object.entries(traits)) {
+    if (v == null) continue;
+    if (Array.isArray(v)) {
+      if (v.length > 0) out[op] = op === '$unset' ? [...v].sort() : v;
+    } else if (typeof v === 'object') {
+      if (Object.keys(v).length > 0) out[op] = v;
+    } else {
+      out[op] = v;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 // ============================================================================
 // API Endpoint paths
 // ============================================================================
@@ -260,7 +299,17 @@ class EncatchSDK {
   private _eventCallbacks: EventCallback[] = [];
 
   // Dedupe: the last identify sent or in flight, and recent event / screen calls.
-  private _lastIdentifyKey: string | null = null;
+  /**
+   * identifyUser() dedupe, for this app run only (1.5.0, PostHog-style): the user
+   * an identify was sent (or is in flight) for, the last traits and the last
+   * options (signature) sent. Cleared when that identify fails or is dropped, and
+   * by resetUser / clearAll; setUserProperties clears the traits.
+   */
+  private _identifiedName: string | null = null;
+  private _lastTraitsKey: string | null = null;
+  private _lastOptionsKey: string | null = null;
+  /** The identify the memory above belongs to (a failed or dropped one clears it). */
+  private _identifyMemoryToken: object | null = null;
   private _lastEventAt = new Map<string, number>();
   private _lastScreen: { name: string; at: number } | null = null;
 
@@ -390,22 +439,50 @@ class EncatchSDK {
     traits?: UserTraits,
     options?: IdentifyOptions
   ): Promise<void> {
-    // Skip a call identical to the last identify sent or still in flight. The
-    // key is cleared if that identify is dropped, and on resetUser / clearAll.
-    const identifyKey = stableKey({
-      userName,
-      traits: traits ?? null,
-      locale: options?.locale ?? null,
-      country: options?.country ?? null,
+    // Traits a request body can't carry would fail inside the queue: refuse now.
+    if (hasUnsendableValue(traits)) {
+      this._logger.warn(
+        `identifyUser "${userName}" ignored: traits contain a value that can't be sent (circular object, BigInt or invalid Date).`
+      );
+      return;
+    }
+
+    // Dedupe (docs/1.5.0-IDENTIFY-DEDUPE-PLAN.md). Sent: the first identify of
+    // this app run or a different user, a changed signature, a locale / country
+    // that differs from the current one, new traits, and always while the
+    // signature is expired or the session is stopped (an identify ends both).
+    // Not sent: the same user again with no traits, or the same traits, as the
+    // last identify sent or still in flight.
+    const dedupeTraits = traitsForDedupe(traits);
+    const traitsKey = dedupeTraits ? stableKey(dedupeTraits) : null;
+    const optionsKey = stableKey({
       signature: options?.secure?.signature ?? null,
       signatureTime: options?.secure?.generatedDateTimeinUTC ?? null,
     });
-    if (identifyKey === this._lastIdentifyKey) {
-      this._logger.debug(`identifyUser "${userName}" skipped: same as the last identify`);
+    const localeChanged = options?.locale != null && options.locale !== this._locale;
+    const countryChanged = options?.country != null && options.country !== this._country;
+    const duplicate =
+      !this._signatureExpired &&
+      !this._isSessionStopped &&
+      userName === this._identifiedName &&
+      optionsKey === this._lastOptionsKey &&
+      !localeChanged &&
+      !countryChanged &&
+      (traitsKey === null || traitsKey === this._lastTraitsKey);
+    if (duplicate) {
+      this._logger.debug(
+        `identifyUser "${userName}" skipped: same user and traits as the last identify in this app run. ` +
+          `To update properties again on purpose (for example a repeated $increment), use setUserProperties("${userName}", traits).`
+      );
       this._reportSkipped('identify-user', 'duplicate');
       return;
     }
-    this._lastIdentifyKey = identifyKey;
+    const memoryToken = {};
+    if (userName !== this._identifiedName) this._lastTraitsKey = null;
+    this._identifiedName = userName;
+    this._lastOptionsKey = optionsKey;
+    if (traitsKey !== null) this._lastTraitsKey = traitsKey;
+    this._identifyMemoryToken = memoryToken;
 
     // Switching user: take this user's stored id (or none) together with the
     // name, so a request never pairs this name with another user's id. With no
@@ -522,7 +599,7 @@ class EncatchSDK {
       this._handleSurveyInReply(res);
     }, undefined, () => {
       // Dropped without succeeding: allow the same identify to be sent again.
-      if (this._lastIdentifyKey === identifyKey) this._lastIdentifyKey = null;
+      if (this._identifyMemoryToken === memoryToken) this._clearIdentifyMemory();
     });
 
     // Immediately flush so identify is best-effort real-time
@@ -1492,6 +1569,14 @@ class EncatchSDK {
     for (const params of held) this.submitForm(params).catch(() => {});
   }
 
+  /** Forgets the identifyUser() dedupe memory. */
+  private _clearIdentifyMemory(): void {
+    this._identifiedName = null;
+    this._lastTraitsKey = null;
+    this._lastOptionsKey = null;
+    this._identifyMemoryToken = null;
+  }
+
   /** Runs identify / reset operations one after the other, in call order. */
   private _identityChain: Promise<unknown> = Promise.resolve();
   private _runIdentityOp(op: () => Promise<void>): Promise<void> {
@@ -1502,7 +1587,7 @@ class EncatchSDK {
 
   /** Forgets the last identify and recent event/screen calls (new user or full reset). */
   private _clearDedupe(): void {
-    this._lastIdentifyKey = null;
+    this._clearIdentifyMemory();
     this._lastEventAt.clear();
     this._lastScreen = null;
   }
