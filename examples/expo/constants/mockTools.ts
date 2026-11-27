@@ -7,7 +7,7 @@
  *   If the mock isn't running, the reports fail silently.
  * Never used for UAT or production.
  */
-import type { EncatchConfig, EventPayload, EventType } from '@encatch/react-native-sdk';
+import { Encatch, type EncatchConfig, type EventPayload, type EventType } from '@encatch/react-native-sdk';
 import { MOCK_API_URL, type EncatchEnvironment } from './environments';
 
 /** Environments whose SDK activity is reported to the local collector. */
@@ -41,23 +41,43 @@ export function reportSdkEvent(type: EventType, payload: EventPayload) {
   report({ sdkEvent: type, formId: payload.formId ?? null });
 }
 
-export type MockSignature = 'none' | 'valid' | 'wrong';
+export type MockSignature = 'none' | 'valid' | 'wrong' | 'expired';
 
 /**
  * Secure mode: in production the customer's backend signs the user name. Here the
  * mock stands in for that backend. 'wrong' flips the signature so the gateway
- * rejects it.
+ * rejects it; 'expired' signs a time 20 minutes old (keys with a session time), so
+ * the gateway rejects it as expired and the SDK calls onSignatureExpired.
  */
 export async function mockSignIdentify(
   userName: string,
   apiKey: string,
   kind: Exclude<MockSignature, 'none'>
 ): Promise<{ signature: string; generatedDateTimeinUTC?: string }> {
+  const age = kind === 'expired' ? '&ageMinutes=20' : '';
   const res = await fetch(
-    `${MOCK_API_URL}/__mock/sign?userName=${encodeURIComponent(userName)}&apiKey=${encodeURIComponent(apiKey)}`
+    `${MOCK_API_URL}/__mock/sign?userName=${encodeURIComponent(userName)}&apiKey=${encodeURIComponent(apiKey)}${age}`
   );
   // `time` comes back only for keys with a session time.
   const { signature, time } = (await res.json()) as { signature: string; time?: string };
   const signed = kind === 'wrong' ? signature.split('').reverse().join('') : signature;
   return { signature: signed, generatedDateTimeinUTC: time };
+}
+
+/**
+ * onSignatureExpired, as an app would write it: get a fresh signature from your
+ * server and identify again. Here the mock stands in for that server (mock only;
+ * on DEV the call is only reported). Also reported to the local collector (E8).
+ */
+export function mockOnSignatureExpired(
+  apiKey: string,
+  environment: EncatchEnvironment
+): NonNullable<EncatchConfig['onSignatureExpired']> {
+  return ({ userName }) => {
+    report({ hook: 'onSignatureExpired', info: { userName } });
+    if (environment !== 'mock') return;
+    mockSignIdentify(userName, apiKey, 'valid')
+      .then((secure) => Encatch.identifyUser(userName, undefined, { secure }))
+      .catch(() => {});
+  };
 }

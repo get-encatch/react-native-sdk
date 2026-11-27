@@ -15,6 +15,7 @@ export type {
   EncatchConfig,
   EncatchRequestInfo,
   EncatchResponseInfo,
+  SignatureExpiredInfo,
   ShowFormInterceptorPayload,
   UserTraits,
   IdentifyOptions,

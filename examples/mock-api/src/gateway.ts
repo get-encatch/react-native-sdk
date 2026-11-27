@@ -1,7 +1,8 @@
 /**
  * Gateway layer (user-gateway-service). Order of checks as in ugw-proxy/src/lib.rs:
  * route → API key → Referer → key validity / referer allowed / identify signature → rate limit.
- * Every rejection is JSON `{"error": "..."}`.
+ * Every rejection is JSON `{"error": "..."}`; an expired identify signature adds
+ * `"reason": "user_signature_expired"` (gateway since 2026-11-27).
  */
 import type { EndpointName, RateLimitKey } from './scenario';
 import { checkIdentifySignature } from './signature';
@@ -18,7 +19,13 @@ export interface GatewayRequest {
 
 export type GatewayResult =
   | { ok: true; headers: Record<string, string> }
-  | { ok: false; status: number; body: { error: string }; headers: Record<string, string>; rateLimited: boolean };
+  | {
+      ok: false;
+      status: number;
+      body: { error: string; reason?: string };
+      headers: Record<string, string>;
+      rateLimited: boolean;
+    };
 
 const reject = (status: number, error: string, rateLimited = false, headers: Record<string, string> = {}): GatewayResult => ({
   ok: false,
@@ -57,6 +64,9 @@ export function runGateway(state: MockState, req: GatewayRequest, now: number = 
   // are not checked either way).
   if (req.endpoint === 'identify-user' || (sc.enforceSignatureOnAllRequests && key.secret)) {
     const sig = checkIdentifySignature(req.headers, key, now);
+    if (sig === 'expired') {
+      return { ok: false, status: 401, body: { error: 'invalid api key', reason: 'user_signature_expired' }, headers: {}, rateLimited: false };
+    }
     if (sig !== 'ok') return reject(401, 'invalid api key');
   }
 

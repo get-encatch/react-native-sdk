@@ -19,7 +19,13 @@ import {
 import { TestUsersProvider } from '@/contexts/TestUsersContext';
 import { TesterSessionProvider } from '@/contexts/TesterSessionContext';
 import { getEnvironmentEndpoints } from '@/constants/environments';
-import { mockDebugHooks, reportFormShown, reportSdkEvent, reportsToLocalCollector } from '@/constants/mockTools';
+import {
+  mockDebugHooks,
+  mockOnSignatureExpired,
+  reportFormShown,
+  reportSdkEvent,
+  reportsToLocalCollector,
+} from '@/constants/mockTools';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -103,7 +109,9 @@ function EncatchAppInner({
         debugMode: true,
         persistUserAcrossRestarts: setupValues.persistUserAcrossRestarts,
         // Mock and DEV only: report the SDK's debug hooks to the local collector for the E2E flows.
-        ...(reportsToLocalCollector(setupValues.environment) ? mockDebugHooks : {}),
+        ...(reportsToLocalCollector(setupValues.environment)
+          ? { ...mockDebugHooks, onSignatureExpired: mockOnSignatureExpired(setupValues.apiKey, setupValues.environment) }
+          : {}),
         onBeforeShowForm: async (payload) => {
           // Mock and DEV only: tells the E2E flows which form the SDK is about to show.
           if (reportsToLocalCollector(setupValues.environment)) reportFormShown(payload.formId);
